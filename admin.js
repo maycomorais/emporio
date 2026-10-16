@@ -3519,11 +3519,11 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
     );
   };
 
-  // ── 1. Busca em paralelo ────────────────────────────────────────
+    // ── 1. Busca em paralelo ────────────────────────────────────────
   const [
     { data: rows, error },
-    { data: pedidosBrutos },
-    { data: movs },
+    { data: pedidosBrutos, error: errPedidos },
+    { data: movs, error: errMovs },
   ] = await Promise.all([
     supa.from("vw_sessao_resumo").select("*").eq("sessao_id", sessaoId).limit(1),
     supa
@@ -3541,6 +3541,23 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
       .select("tipo, valor, tipo_despesa, descricao_outro")
       .eq("sessao_id", sessaoId),
   ]);
+
+  // 🔧 Antes, erros em pedidos/movs eram silenciados e o fechamento
+  //    saía zerado sem aviso. Agora: loga + avisa o operador.
+  if (errPedidos) {
+    console.error("[Fechamento] Erro ao buscar pedidos:", errPedidos.message);
+    alert(
+      "⚠️ Não foi possível buscar os pedidos desta sessão.\n\n" +
+      "Motivo: " + errPedidos.message + "\n\n" +
+      "O fechamento será exibido, mas os valores podem estar zerados."
+    );
+  }
+  if (errMovs) {
+    console.error("[Fechamento] Erro ao buscar movimentações:", errMovs.message);
+  }
+  if (error) {
+    console.warn("[Fechamento] View vw_sessao_resumo falhou:", error.message);
+  }
 
   const peds = pedidosBrutos || [];
   const movsArr = movs || [];
