@@ -617,12 +617,17 @@ function _aplicarFormasPagamentoPDV(features) {
 
 
 function _feat(categoria, chave) {
-  if (!FEATURES_ATIVAS) return true; // sem config = tudo ativo
+  if (!FEATURES_ATIVAS) return true;
 
-  // Permissões granulares por cargo (permissoes_cargo) têm prioridade
-  // sobre o controle global (tabs/funcionalidades)
   if (categoria === "tabs" && perfilUsuario) {
     const pCargo = FEATURES_ATIVAS?.permissoes_cargo?.[perfilUsuario];
+    
+    // 🔒 REGRA DE SEGURANÇA PARA O SÓCIO:
+    // Se for sócio e não houver configuração salva para ele, bloqueia tudo.
+    if (perfilUsuario === "socio" && (!pCargo || !Array.isArray(pCargo.tabs))) {
+        return false;
+    }
+
     if (pCargo && Array.isArray(pCargo.tabs)) {
       return pCargo.tabs.includes(chave);
     }
@@ -648,31 +653,42 @@ function _aplicarVisibilidadeAbas() {
     "menu-crm":           "crm",
     "menu-turnos":        "turnos",
     "menu-produtos":      "produtos",
-    "menu-categorias":    "categorias", // Agora independente
-    "menu-motoboys":      "motoboys",   // Adicionado
+    "menu-categorias":    "categorias",
+    "menu-motoboys":      "motoboys",
     "menu-mensalistas":   "mensalistas",
     "menu-filiais":       "filiais",
+    "menu-notas":         "notas",
+    "menu-facturacion":   "facturacion"
   };
   
   if (perfilUsuario === "adminMaster") return;
 
   Object.entries(mapa).forEach(([menuId, chave]) => {
     const el = document.getElementById(menuId);
-    if (!el) return;
+    if (!el) {
+      console.warn(`[Menu] Elemento com ID ${menuId} não encontrado no HTML!`);
+      return;
+    }
     const visivel = _feat("tabs", chave);
-    el.style.display = visivel ? "flex" : "none";
+    
+    // Usa important para evitar que regras CSS de flexbox mostrem o item
+    if (visivel) {
+      el.style.setProperty("display", "flex", "important");
+    } else {
+      el.style.setProperty("display", "none", "important");
+    }
   });
   
   _aplicarFuncionalidades();
 
-  // ── REDIRECIONAMENTO INTELIGENTE ──
-  // Se a aba que está aberta no momento foi bloqueada, 
-  // clica automaticamente na primeira aba que ele tem permissão.
+  // Redirecionamento inteligente
   setTimeout(() => {
     const activeMenu = document.querySelector('.sb-menu-item.active');
-    if (activeMenu && activeMenu.style.display === 'none') {
+    if (activeMenu && (activeMenu.style.display === 'none' || activeMenu.style.display === '')) {
       const firstVisible = document.querySelector('.sb-menu-item[style*="display: flex"]');
-      if (firstVisible) firstVisible.click();
+      if (firstVisible && firstVisible !== activeMenu) {
+        firstVisible.click();
+      }
     }
   }, 100);
 }
@@ -870,7 +886,7 @@ async function renderPainelFeatures() {
     ["equipe", "👥 Equipe"], ["configuracoes", "⚙️ Config"], ["dashboard", "📊 Dashboard"],
     ["estatisticas", "📈 Estatísticas"], ["ficha-tecnica", "📝 Ficha Técnica"],
     ["crm", "🤝 CRM"], ["mensalistas", "🗓️ Mensalistas"], ["turnos", "📺 Turnos"],
-    ["notas", "🧾 Notas"], ["facturacion", "🧮 Facturación"], ["filiais", "🏬 Filiais"]
+    ["notas", "📋 Na Nota"], ["facturacion", "🧮 Facturación"], ["filiais", "🏬 Filiais"]
   ];
   
   const pCargos = f.permissoes_cargo || {};
