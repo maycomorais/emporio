@@ -145,11 +145,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Carrega features e aplica visibilidade das abas
     await _carregarFeaturesGlobais();
 
-    // Sócio: carrega suas permissões individuais ANTES de aplicar visibilidade
-    if (perfilUsuario === "socio") {
-      await _carregarPermissoesSocio();
-    }
-
     // Atualiza brand com nome do restaurante (carregado em _carregarFeaturesGlobais)
     const elBrand = document.getElementById("brand-text");
     if (elBrand) elBrand.textContent = (NOME_RESTAURANTE || "ADMIN") + " ADMIN";
@@ -476,6 +471,8 @@ function showTab(tabId, event) {
     }
   }
 
+  if (realTabId === "notas") notasInicializar();
+
   // 6. Carregamento de dados
   if (realTabId === "pedidos") {
     carregarPedidos();
@@ -618,45 +615,19 @@ function _aplicarFormasPagamentoPDV(features) {
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Permissões do perfil Sócio (cache em memória)
-//  Formato do cache: { abas: ["dashboard","pdv",...] }
-//  Populado por _carregarPermissoesSocio() no boot do painel.
-// ─────────────────────────────────────────────────────────────
-let _permissoesSocio = null;
-
-/**
- * Consulta o banco e cacheia a lista de abas que o Sócio
- * logado pode ver. Chamar 1x no boot do painel.
- * Usa a RPC get_minhas_abas() que já resolve:
- *   - adminMaster/dono → todas as abas
- *   - socio → apenas permissoes_customizadas.abas
- *   - demais → todas (features_ativas filtra no front)
- */
-async function _carregarPermissoesSocio() {
-  try {
-    const { data, error } = await supa
-      .from("perfis_acesso")
-      .select("permissoes_customizadas")
-      .eq("id", _perfilId)
-      .single();
-
-    if (error) throw error;
-    
-    // Se não houver nada salvo, o padrão é um array vazio (não vê nada além do dashboard)
-    _permissoesSocio = {
-      abas: data?.permissoes_customizadas?.abas || [],
-    };
-    console.log("[Sócio] Permissões carregadas:", _permissoesSocio.abas);
-  } catch (e) {
-    console.warn("[Sócio] Erro ao carregar permissões:", e.message);
-    _permissoesSocio = { abas: [] };
-  }
-}
-
 
 function _feat(categoria, chave) {
   if (!FEATURES_ATIVAS) return true; // sem config = tudo ativo
+
+  // Permissões granulares por cargo (permissoes_cargo) têm prioridade
+  // sobre o controle global (tabs/funcionalidades)
+  if (categoria === "tabs" && perfilUsuario) {
+    const pCargo = FEATURES_ATIVAS?.permissoes_cargo?.[perfilUsuario];
+    if (pCargo && Array.isArray(pCargo.tabs)) {
+      return pCargo.tabs.includes(chave);
+    }
+  }
+  
   const cat = FEATURES_ATIVAS[categoria];
   if (!cat) return true;
   return cat[chave] !== false;
@@ -664,242 +635,476 @@ function _feat(categoria, chave) {
 
 function _aplicarVisibilidadeAbas() {
   const mapa = {
-    "menu-pedidos":        "pedidos",
-    "menu-cozinha":        "cozinha",
-    "menu-pdv":            "pdv",
-    "menu-financeiro":     "financeiro",
-    "menu-inventario":     "inventario",
-    "menu-equipe":         "equipe",
-    "menu-configuracoes":  "configuracoes",
-    "menu-dashboard":      "dashboard",
-    "menu-estatisticas":   "estatisticas",
-    "menu-ficha-tecnica":  "ficha-tecnica",
-    "menu-crm":            "crm",
-    "menu-turnos":         "turnos",
-    "menu-produtos":       "produtos",
-    "menu-mensalistas":    "mensalistas",
-    "menu-filiais":        "filiais",
+    "menu-pedidos":       "pedidos",
+    "menu-cozinha":       "cozinha",
+    "menu-pdv":           "pdv",
+    "menu-financeiro":    "financeiro",
+    "menu-inventario":    "inventario",
+    "menu-equipe":        "equipe",
+    "menu-configuracoes": "configuracoes",
+    "menu-dashboard":     "dashboard",
+    "menu-estatisticas":  "estatisticas",
+    "menu-ficha-tecnica": "ficha-tecnica",
+    "menu-crm":           "crm",
+    "menu-turnos":        "turnos",
+    "menu-produtos":      "produtos",
+    "menu-categorias":    "categorias", // Agora independente
+    "menu-motoboys":      "motoboys",   // Adicionado
+    "menu-mensalistas":   "mensalistas",
+    "menu-filiais":       "filiais",
   };
-
-  // adminMaster: vê tudo, ignora features e permissões
+  
   if (perfilUsuario === "adminMaster") return;
 
-  // ── Sócio: aplica DOIS filtros em conjunto ────────────────
-  //  1. features_ativas (bloqueio global da loja)
-  //  2. permissoes_customizadas.abas (bloqueio individual do sócio)
-  if (perfilUsuario === "socio") {
-    const permitidas = _permissoesSocio?.abas || [];
-
-    Object.entries(mapa).forEach(([menuId, chave]) => {
-      const el = document.getElementById(menuId);
-      if (!el) return;
-
-      const bloqueadoPorFeature = !_feat("tabs", chave);
-      const naoPermitidoAoSocio  = !permitidas.includes(chave);
-
-      if (bloqueadoPorFeature || naoPermitidoAoSocio) {
-        el.style.display = "none";
-      }
-    });
-    return;
-  }
-
-  // ── Demais cargos (gerente/funcionario/garcom) ────────────
-  //  Só o filtro global de features_ativas se aplica
   Object.entries(mapa).forEach(([menuId, chave]) => {
     const el = document.getElementById(menuId);
-    if (el && !_feat("tabs", chave)) el.style.display = "none";
+    if (!el) return;
+    const visivel = _feat("tabs", chave);
+    el.style.display = visivel ? "flex" : "none";
   });
+  
+  _aplicarFuncionalidades();
+
+  // ── REDIRECIONAMENTO INTELIGENTE ──
+  // Se a aba que está aberta no momento foi bloqueada, 
+  // clica automaticamente na primeira aba que ele tem permissão.
+  setTimeout(() => {
+    const activeMenu = document.querySelector('.sb-menu-item.active');
+    if (activeMenu && activeMenu.style.display === 'none') {
+      const firstVisible = document.querySelector('.sb-menu-item[style*="display: flex"]');
+      if (firstVisible) firstVisible.click();
+    }
+  }, 100);
 }
+
+function _aplicarFuncionalidades() {
+  const f = FEATURES_ATIVAS?.funcionalidades;
+  if (!f) return; // sem config = tudo ativo
+
+  // Tipos de entrega no PDV
+  ["delivery", "retirada", "local", "balcao"].forEach((tipo) => {
+    if (f[tipo] === false) {
+      document.querySelectorAll(`.pdv-tipo-tab[data-tipo="${tipo}"]`)
+        .forEach((el) => { el.style.display = "none"; });
+    }
+  });
+
+  // Multipagamento: oculta a opção no select do PDV
+  if (f.multipagamento === false) {
+    const selPag = document.getElementById("balcao-pag");
+    if (selPag) {
+      Array.from(selPag.options).forEach((opt) => {
+        if (opt.value === "Multipagamento") {
+          opt.style.display = "none";
+          if (selPag.value === "Multipagamento") selPag.value = "Efetivo";
+        }
+      });
+    }
+  }
+
+  // Cupons: oculta card de cupons
+  if (f.cupons === false) {
+    const cupomCard = document.getElementById("card-cupons-cfg");
+    if (cupomCard) cupomCard.style.display = "none";
+    document.querySelectorAll('[onclick*="cupom"], [onclick*="Cupom"]')
+      .forEach((el) => { el.style.display = "none"; });
+  }
+
+  // Factura: oculta campos de factura no checkout
+  if (f.factura === false) {
+    document.querySelectorAll('.box-factura, #box-factura, [data-feat-ui="factura"]')
+      .forEach((el) => { el.style.display = "none"; });
+  }
+}
+
+function _podeCancelarDireto() {
+  // adminMaster sempre pode
+  if (perfilUsuario === "adminMaster") return true;
+  
+  const pCargo = FEATURES_ATIVAS?.permissoes_cargo?.[perfilUsuario];
+  if (pCargo && "pode_cancelar_direto" in pCargo) {
+    return pCargo.pode_cancelar_direto === true;
+  }
+  
+  // fallback: lógica original
+  return ["dono", "gerente"].includes(perfilUsuario);
+}
+
+// Salva features (adminMaster only)
 // Salva features (adminMaster only)
 async function salvarFeatures() {
   if (perfilUsuario !== "adminMaster") return alert(t("alert.acesso_negado"));
-  const tabs = {},
-    tipos = {},
-    funcs = {};
-  document.querySelectorAll("[data-feat-tab]").forEach((el) => {
-    tabs[el.dataset.featTab] = el.checked;
+  
+  const tabs = {}, tipos = {}, funcs = {}, pagamentos = {};
+  
+  document.querySelectorAll("[data-feat-tab]").forEach((el) => { tabs[el.dataset.featTab] = el.checked; });
+  document.querySelectorAll("[data-feat-tipo]").forEach((el) => { tipos[el.dataset.featTipo] = el.checked; });
+  document.querySelectorAll("[data-feat-func]").forEach((el) => { funcs[el.dataset.featFunc] = el.checked; });
+  document.querySelectorAll("[data-feat-pag]").forEach((el) => { pagamentos[el.dataset.featPag] = el.checked; });
+
+  // ── Permissões granulares por cargo (agora incluindo socio) ─────
+  const permissoes_cargo = {};
+  const CARGOS_PERM = ["dono", "gerente", "socio", "funcionario", "garcom"]; // <-- SÓCIO ADICIONADO
+  
+    const ABAS_PERM = [
+    "pedidos","cozinha","pdv","financeiro","inventario","produtos", 
+    "categorias", "motoboys", // <-- ADICIONADOS
+    "equipe","configuracoes","dashboard","estatisticas","ficha-tecnica",
+    "crm","mensalistas","turnos","notas","facturacion","filiais"
+  ];
+  
+  CARGOS_PERM.forEach(cargo => {
+    const tabsPermitidas = ABAS_PERM.filter(aba => {
+      const el = document.querySelector(`[data-perm-tab="${aba}"][data-perm-cargo="${cargo}"]`);
+      return el ? el.checked : true; // default: permitido
+    });
+    const podeCancel = document.querySelector(`[data-perm-cancelar][data-perm-cargo="${cargo}"]`)?.checked ?? false;
+    
+    permissoes_cargo[cargo] = { 
+      tabs: tabsPermitidas, 
+      pode_cancelar_direto: podeCancel 
+    };
   });
-  document.querySelectorAll("[data-feat-tipo]").forEach((el) => {
-    tipos[el.dataset.featTipo] = el.checked;
-  });
-  document.querySelectorAll("[data-feat-func]").forEach((el) => {
-    funcs[el.dataset.featFunc] = el.checked;
-  });
-  const pagamentos = {};
-  document.querySelectorAll("[data-feat-pag]").forEach((el) => {
-    pagamentos[el.dataset.featPag] = el.checked;
-  });
+
   const features = {
     tabs,
     tipos_produto: tipos,
     funcionalidades: funcs,
     pagamentos,
+    permissoes_cargo,
   };
+
   const { error } = await supa
     .from("configuracoes")
     .update({ features_ativas: features })
     .gt("id", 0);
-  if (error) return alert("Erro: " + error.message);
+    
+  if (error) return alert("Error: " + error.message);
   FEATURES_ATIVAS = features;
+
+  _aplicarFormasPagamentoPDV(features);
+  if (perfilUsuario !== "adminMaster") {
+    _aplicarVisibilidadeAbas();
+  }
+
   alert(t("alert.features_salvas"));
 }
 
-// Renderiza painel de features (adminMaster)
-//
-// ─────────────────────────────────────────────────────────────
-//  ARQUITETURA (fix do conflito entre abas):
-//
-//  O painel completo é renderizado APENAS em
-//  #painel-features-master (aba Admin Master).
-//
-//  O card #card-adminmaster-cfg (dentro de Configurações) NÃO
-//  duplica os checkboxes — vira um atalho visual que redireciona
-//  para a aba Admin Master.
-//
-//  Por quê:
-//  Antes, os mesmos atributos data-feat-* eram renderizados em
-//  DOIS lugares (#painel-features E #painel-features-master).
-//  salvarFeatures() usava document.querySelectorAll() global, que
-//  capturava AMBAS as cópias — o valor final dependia da ordem do
-//  DOM (o último sobrescrevia), silenciosamente descartando as
-//  edições feitas no outro painel.
-// ─────────────────────────────────────────────────────────────
+// Renderiza painel de features (adminMaster) - EXCLUSIVO NA ABA ADMIN MASTER
 async function renderPainelFeatures() {
-  const master   = document.getElementById("painel-features-master");
-  const shortcut = document.getElementById("painel-features");
-  if (!master && !shortcut) return;
-
+  // 🔧 Correção: Apenas renderiza no painel da aba Admin Master
+  const target = document.getElementById("painel-features-master");
+  if (!target) return;
+  
   await _carregarFeaturesGlobais();
-  const f      = FEATURES_ATIVAS || {};
-  const tabs   = f.tabs            || {};
-  const tipos  = f.tipos_produto   || {};
-  const funcs  = f.funcionalidades || {};
-  const pags   = f.pagamentos      || {};
+  const f = FEATURES_ATIVAS || {};
+  const tabs = f.tabs || {};
+  const tipos = f.tipos_produto || {};
+  const funcs = f.funcionalidades || {};
+
+  const _chk = (attr, key, val, label, bg = "#f9f9f9") =>
+    `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+        background:${bg};border-radius:8px;cursor:pointer;
+        border:1.5px solid ${val !== false ? "#27ae60" : "#ddd"};transition:border .2s">
+      <input type="checkbox" ${attr}="${key}" ${val !== false ? "checked" : ""}
+        onchange="this.closest('label').style.borderColor=this.checked?'#27ae60':'#ddd'"
+        style="width:17px;height:17px;accent-color:#27ae60;flex-shrink:0">
+      <span style="font-size:0.85rem">${label}</span></label>`;
 
   const chkTabs = [
-    ["pedidos",         "Pedidos"],
-    ["cozinha",         "Cozinha/KDS"],
-    ["pdv",             "PDV Balcão"],
-    ["financeiro",      "Financeiro"],
-    ["inventario",      "Inventário"],
-    ["equipe",          "Equipe"],
-    ["configuracoes",   "Configurações"],
-    ["dashboard",       "Dashboard"],
-    ["turnos",          "Painel Turnos/TV"],
-    ["estatisticas",    "Estatísticas"],
-    ["ficha-tecnica",   "Ficha Técnica"],
-    ["crm",             "CRM Clientes"],
-    ["mensalistas",     "Mensalistas"],
-    ["filiais",         "Filiais"],
-  ]
-    .map(
-      ([k, l]) => `<label style="display:flex;align-items:center;gap:8px;padding:6px;background:#f9f9f9;border-radius:6px">
-    <input type="checkbox" data-feat-tab="${k}" ${tabs[k] !== false ? "checked" : ""} style="width:18px;height:18px">
-    <span>${l}</span></label>`,
-    )
-    .join("");
+    ["pedidos", "📋 Pedidos"], ["cozinha", "👨‍🍳 Cozinha/KDS"],
+    ["pdv", "🖥️ PDV Balcão"], ["financeiro", "💰 Financeiro"],
+    ["inventario", "📦 Inventário"], ["produtos", "🍽️ Produtos"],
+    ["equipe", "👥 Equipe"], ["configuracoes", "⚙️ Configurações"],
+    ["dashboard", "📊 Dashboard"], ["estatisticas", "📈 Estatísticas"],
+    ["ficha-tecnica", "📝 Ficha Técnica"], ["crm", "🤝 CRM Clientes"],
+    ["mensalistas", "🗓️ Mensalistas"], ["turnos", "📺 Painel Turnos/TV"],
+    ["notas", "🧾 Notas/Facturas"], ["facturacion", "🧮 Facturación"],
+    ["filiais", "🏬 Filiais"]
+  ].map(([k, l]) => _chk("data-feat-tab", k, tabs[k], l, "#f0f9ff")).join("");
 
   const chkTipos = [
-    ["padrao",     "Simples"],
-    ["bebida",     "Bebida"],
-    ["lanche",     "Lanche"],
-    ["pizza",      "Pizza"],
-    ["acai",       "Açaí"],
-    ["shake",      "Shake"],
-    ["suco",       "Suco"],
-    ["sorvete",    "Sorvete"],
-    ["montavel",   "Montável"],
-    ["combo",      "Combo"],
-    ["variacoes",  "Variações"],
-    ["kg",         "⚖️ Venda Kg"],
-  ]
-    .map(
-      ([k, l]) => `<label style="display:flex;align-items:center;gap:8px;padding:6px;background:#f9f9f9;border-radius:6px">
-    <input type="checkbox" data-feat-tipo="${k}" ${tipos[k] !== false ? "checked" : ""} style="width:18px;height:18px">
-    <span>${l}</span></label>`,
-    )
-    .join("");
+    ["padrao", "📦 Simples"], ["bebida", "🥤 Bebida"], ["lanche", "🍔 Lanche"],
+    ["pizza", "🍕 Pizza"], ["acai", "🍇 Açaí"], ["shake", "🥤 Shake"],
+    ["suco", "🍊 Suco"], ["sorvete", "🍦 Sorvete"], ["montavel", "🥗 Montável"],
+    ["combo", "⭐ Combo"], ["variacoes", "🎨 Multi-variação"], ["kg", "⚖️ Venda por Kg"],
+    ["roupa", "👕 Roupa"], ["eletronico", "🔌 Eletrônico"], ["suplemento", "💪 Suplemento"],
+    ["pod", "☁️ Pod/Tabacaria"], ["mercado", "🛒 Mercado"]
+  ].map(([k, l]) => _chk("data-feat-tipo", k, tipos[k], l, "#fdf9ff")).join("");
+
+  const pags = f.pagamentos || {};
+  const chkPags = [
+    ["Efetivo", "💵 Efectivo/Dinheiro"], ["Cartao", "💳 Tarjeta (Débito + Crédito)"],
+    ["CartaoBR", "💳🇧🇷 Tarjeta BR (Débito + Crédito)"], ["Pix", "🟢 Pix (BR)"],
+    ["Transferencia", "🏦 Alias/Transferência PY"], ["QrMaquina", "📱 QR (Máquina + Celular + App)"],
+    ["Multipagamento", "🔀 Dividir Pagamento"], ["Mensalista", "🎫 Mensalista"],
+    ["NaNota", "📋 Colocar na Nota"]
+  ].map(([k, l]) => _chk("data-feat-pag", k, pags[k], l, "#f0fff4")).join("");
 
   const chkFuncs = [
-    ["delivery",         "Delivery"],
-    ["retirada",         "Retirada"],
-    ["local",            "Comer no Local"],
-    ["balcao",           "Balcão/PDV"],
-    ["cupons",           "Cupons"],
-    ["factura",          "Factura"],
-    ["multipagamento",   "Multipagamento"],
-    ["agendamento",      "Agendamento"],
-  ]
-    .map(
-      ([k, l]) => `<label style="display:flex;align-items:center;gap:8px;padding:6px;background:#f9f9f9;border-radius:6px">
-    <input type="checkbox" data-feat-func="${k}" ${funcs[k] !== false ? "checked" : ""} style="width:18px;height:18px">
-    <span>${l}</span></label>`,
-    )
-    .join("");
+    ["delivery", "🛵 Delivery"], ["retirada", "🏃 Retirada"], ["local", "🍽️ Comer no Local"],
+    ["balcao", "🏪 Mostrador/PDV"], ["cupons", "🎟️ Cupons"], ["factura", "🧾 Factura PY"],
+    ["multipagamento", "🔀 Multipagamento"], ["agendamento", "📅 Agendamento"]
+  ].map(([k, l]) => _chk("data-feat-func", k, funcs[k], l, "#fffbf0")).join("");
 
-  const chkPags = [
-    ["Efetivo",         "💵 Efectivo/Dinheiro"],
-    ["Cartao",          "💳 Tarjeta PY"],
-    ["CartaoBR",        "💳🇧🇷 Cartão Brasileiro (R$)"],
-    ["Pix",             "🟢 Pix (BR)"],
-    ["Transferencia",   "🏦 Alias/Transferência PY"],
-    ["QrPy",            "📱 QR Paraguay"],
-    ["Multipagamento",  "🔀 Dividir Pagamento"],
-  ]
-    .map(
-      ([k, l]) =>
-        `<label style="display:flex;align-items:center;gap:8px;padding:6px;background:#f9f9f9;border-radius:6px">
-      <input type="checkbox" data-feat-pag="${k}" ${pags[k] !== false ? "checked" : ""} style="width:18px;height:18px">
-      <span>${l}</span></label>`,
-    )
-    .join("");
-
-  const html = `
-    <div style="display:grid;gap:20px">
-      <div>
-        <h4 style="margin-bottom:10px;color:#2c3e50">📂 Abas visíveis</h4>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">${chkTabs}</div>
-      </div>
-      <div>
-        <h4 style="margin-bottom:10px;color:#2c3e50">💳 Formas de Pagamento</h4>
-        <p style="font-size:0.8rem;color:#888;margin-bottom:8px">Controla o que aparece no app do cliente <strong>e</strong> no PDV</p>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">${chkPags}</div>
-      </div>
-      <div>
-        <h4 style="margin-bottom:10px;color:#2c3e50">🏷️ Tipos de produto permitidos</h4>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px">${chkTipos}</div>
-      </div>
-      <div>
-        <h4 style="margin-bottom:10px;color:#2c3e50">⚙️ Funcionalidades</h4>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">${chkFuncs}</div>
-      </div>
-      <button class="btn btn-primary" onclick="salvarFeatures()"><i class="fas fa-save"></i> Salvar Features</button>
+  const _sec = (title, subtitle, grid, bg = "#fff") =>
+    `<div style="background:${bg};border:1.5px solid #e8eaf6;border-radius:12px;padding:16px 18px">
+      <h4 style="margin:0 0 4px;color:#2c3e50;font-size:0.93rem;font-weight:700">${title}</h4>
+      ${subtitle ? `<p style="font-size:0.78rem;color:#999;margin:0 0 10px">${subtitle}</p>` : "<div style='height:10px'></div>"}
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:7px">${grid}</div>
     </div>`;
 
-  // ── Painel autoritativo: aba Admin Master ──
-  if (master) master.innerHTML = html;
+  // 🔧 SÓCIO ADICIONADO AQUI TAMBÉM
+  const CARGOS_UI = [
+    { key: "dono", label: "🔑 Dono", cor: "#f59e0b" },
+    { key: "gerente", label: "👔 Gerente", cor: "#2980b9" },
+    { key: "socio", label: "🤝 Sócio", cor: "#8e44ad" }, 
+    { key: "funcionario", label: "👷 Empleado", cor: "#7f8c8d" },
+    { key: "garcom", label: "🍽️ Mozo", cor: "#27ae60" }
+  ];
+  
+    const ABAS_UI = [
+    ["pedidos", "📋 Pedidos"], ["cozinha", "👨‍🍳 Cozinha"], ["pdv", "🖥️ PDV"],
+    ["financeiro", "💰 Financeiro"], ["inventario", "📦 Inventário"], ["produtos", "🍽️ Produtos"],
+    ["categorias", "🏷️ Categorias"], ["motoboys", "🏍️ Motoboys"], // <-- ADICIONADOS
+    ["equipe", "👥 Equipe"], ["configuracoes", "⚙️ Config"], ["dashboard", "📊 Dashboard"],
+    ["estatisticas", "📈 Estatísticas"], ["ficha-tecnica", "📝 Ficha Técnica"],
+    ["crm", "🤝 CRM"], ["mensalistas", "🗓️ Mensalistas"], ["turnos", "📺 Turnos"],
+    ["notas", "🧾 Notas"], ["facturacion", "🧮 Facturación"], ["filiais", "🏬 Filiais"]
+  ];
+  
+  const pCargos = f.permissoes_cargo || {};
 
-  // ── Configurações: vira atalho (não duplica checkboxes) ──
-  if (shortcut) {
-    shortcut.innerHTML = `
-      <div style="background:#fff5f5;border:1.5px dashed #fca5a5;border-radius:10px;padding:22px 20px;text-align:center">
-        <div style="font-size:1.8rem;margin-bottom:8px">🛡️</div>
-        <div style="font-weight:700;font-size:0.95rem;color:#991b1b;margin-bottom:8px">
-          Controle de Features
-        </div>
-        <div style="font-size:0.83rem;color:#7f1d1d;line-height:1.55;margin-bottom:16px">
-          O gerenciamento de features agora é feito em um lugar único —<br>
-          aba <b>Admin Master</b> — para evitar conflito de estado<br>
-          entre painéis duplicados.
-        </div>
-        <button onclick="showTab('adminmaster', { currentTarget: document.getElementById('menu-adminmaster') })"
-          class="btn btn-danger"
-          style="font-size:0.86rem;padding:10px 20px;background:#e74c3c;border-color:#e74c3c;font-weight:700">
-          <i class="fas fa-arrow-right"></i> Ir para Admin Master
+  const _chkPerm = (cargo, aba, label) => {
+    const perm = pCargos[cargo];
+    const isChecked = perm?.tabs ? perm.tabs.includes(aba) : true;
+    const cor = CARGOS_UI.find(c => c.key === cargo)?.cor || "#888";
+    return `<label style="display:flex;align-items:center;gap:5px;padding:5px 7px;
+        border-radius:7px;cursor:pointer;font-size:0.78rem;
+        background:${isChecked ? cor + "18" : "#f5f5f5"};
+        border:1.5px solid ${isChecked ? cor : "#ddd"};transition:all .15s">
+      <input type="checkbox" data-perm-tab="${aba}" data-perm-cargo="${cargo}"
+        ${isChecked ? "checked" : ""}
+        onchange="this.closest('label').style.background=this.checked?'${cor}18':'#f5f5f5';
+                  this.closest('label').style.borderColor=this.checked?'${cor}':'#ddd'"
+        style="width:14px;height:14px;accent-color:${cor};flex-shrink:0">
+      ${label}
+    </label>`;
+  };
+
+  const permSection = CARGOS_UI.map(({ key, label, cor }) => {
+    const perm = pCargos[key] || {};
+    const podeCancel = perm.pode_cancelar_direto === true;
+    const abasChk = ABAS_UI.map(([k, l]) => _chkPerm(key, k, l)).join("");
+    
+    return `<div style="border:2px solid ${cor}44;border-radius:12px;padding:14px 16px;background:#fff">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <span style="font-weight:700;font-size:0.92rem;color:${cor}">${label}</span>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;
+            font-size:0.8rem;font-weight:600;color:#c0392b;
+            background:${podeCancel ? "#fdecea" : "#f5f5f5"};
+            border:1.5px solid ${podeCancel ? "#e74c3c" : "#ddd"};
+            border-radius:8px;padding:5px 10px;transition:all .15s">
+          <input type="checkbox" data-perm-cancelar data-perm-cargo="${key}"
+            ${podeCancel ? "checked" : ""}
+            onchange="this.closest('label').style.background=this.checked?'#fdecea':'#f5f5f5';
+                      this.closest('label').style.borderColor=this.checked?'#e74c3c':'#ddd'"
+            style="width:14px;height:14px;accent-color:#e74c3c;flex-shrink:0">
+          ❌ Puede cancelar directamente
+        </label>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:5px">${abasChk}</div>
+    </div>`;
+  }).join("");
+
+  const html = `
+    <div style="display:grid;gap:14px">
+      ${_sec("📂 Abas visíveis (global)", "Controla o menu para todos os cargos via regra global. As permissões por cargo abaixo têm prioridade.", chkTabs)}
+      ${_sec("💳 Formas de Pagamento", "App do cliente <strong>e</strong> PDV balcão + filtro financeiro", chkPags)}
+      ${_sec("🏷️ Tipos de Produto permitidos", "Quais tipos podem ser criados no cardápio", chkTipos)}
+      ${_sec("⚙️ Funcionalidades", "Oculta recursos específicos da interface", chkFuncs)}
+      
+      <div style="border:2px solid #e74c3c55;border-radius:14px;padding:16px 18px;background:#fffafa">
+        <h4 style="margin:0 0 4px;color:#c0392b;font-size:0.95rem;font-weight:800">
+          🔐 Permisos Granulares por Cargo
+        </h4>
+        <p style="font-size:0.78rem;color:#999;margin:0 0 14px">
+          Define qué pestañas puede ver cada cargo <strong>y</strong> si puede cancelar pedidos directamente.
+        </p>
+        <div style="display:grid;gap:12px">${permSection}</div>
+      </div>
+      
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="salvarFeatures()" style="flex:1;min-width:160px">
+          <i class="fas fa-save"></i> Guardar Configuración
         </button>
-      </div>`;
-  }
+        <button class="btn" onclick="renderPainelFeatures()"
+          style="background:#f0f4ff;color:#2c3e50;border:1.5px solid #c5cae9">
+          <i class="fas fa-sync"></i> Recarregar
+        </button>
+      </div>
+    </div>`;
+    
+  target.innerHTML = html;
+}
+
+// Renderiza painel de features (adminMaster)
+async function renderPainelFeatures() {
+  // Garante que só renderiza no painel do Admin Master
+  const target = document.getElementById("painel-features-master");
+  if (!target) return;
+  
+  await _carregarFeaturesGlobais();
+  const f = FEATURES_ATIVAS || {};
+  const tabs = f.tabs || {};
+  const tipos = f.tipos_produto || {};
+  const funcs = f.funcionalidades || {};
+
+  const _chk = (attr, key, val, label, bg = "#f9f9f9") =>
+    `<label style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+        background:${bg};border-radius:8px;cursor:pointer;
+        border:1.5px solid ${val !== false ? "#27ae60" : "#ddd"};transition:border .2s">
+      <input type="checkbox" ${attr}="${key}" ${val !== false ? "checked" : ""}
+        onchange="this.closest('label').style.borderColor=this.checked?'#27ae60':'#ddd'"
+        style="width:17px;height:17px;accent-color:#27ae60;flex-shrink:0">
+      <span style="font-size:0.85rem">${label}</span></label>`;
+
+  const chkTabs = [
+    ["pedidos", "📋 Pedidos"], ["cozinha", "👨‍🍳 Cozinha/KDS"],
+    ["pdv", "🖥️ PDV Balcão"], ["financeiro", "💰 Financeiro"],
+    ["inventario", "📦 Inventário"], ["produtos", "🍽️ Produtos"],
+    ["equipe", "👥 Equipe"], ["configuracoes", "⚙️ Configurações"],
+    ["dashboard", "📊 Dashboard"], ["estatisticas", "📈 Estatísticas"],
+    ["ficha-tecnica", "📝 Ficha Técnica"], ["crm", "🤝 CRM Clientes"],
+    ["mensalistas", "🗓️ Mensalistas"], ["turnos", "📺 Painel Turnos/TV"],
+    ["notas", "🧾 Notas/Facturas"], ["facturacion", "🧮 Facturación"],
+    ["filiais", "🏬 Filiais"]
+  ].map(([k, l]) => _chk("data-feat-tab", k, tabs[k], l, "#f0f9ff")).join("");
+
+  const chkTipos = [
+    ["padrao", "📦 Simples"], ["bebida", "🥤 Bebida"], ["lanche", "🍔 Lanche"],
+    ["pizza", "🍕 Pizza"], ["acai", "🍇 Açaí"], ["shake", "🥤 Shake"],
+    ["suco", "🍊 Suco"], ["sorvete", "🍦 Sorvete"], ["montavel", "🥗 Montável"],
+    ["combo", "⭐ Combo"], ["variacoes", "🎨 Multi-variação"], ["kg", "⚖️ Venda por Kg"],
+    ["roupa", "👕 Roupa"], ["eletronico", "🔌 Eletrônico"], ["suplemento", "💪 Suplemento"],
+    ["pod", "☁️ Pod/Tabacaria"], ["mercado", "🛒 Mercado"]
+  ].map(([k, l]) => _chk("data-feat-tipo", k, tipos[k], l, "#fdf9ff")).join("");
+
+  const pags = f.pagamentos || {};
+  const chkPags = [
+    ["Efetivo", "💵 Efectivo/Dinheiro"], ["Cartao", "💳 Tarjeta (Débito + Crédito)"],
+    ["CartaoBR", "💳🇧🇷 Tarjeta BR (Débito + Crédito)"], ["Pix", "🟢 Pix (BR)"],
+    ["Transferencia", "🏦 Alias/Transferência PY"], ["QrMaquina", "📱 QR (Máquina + Celular + App)"],
+    ["Multipagamento", "🔀 Dividir Pagamento"], ["Mensalista", "🎫 Mensalista"],
+    ["NaNota", "📋 Colocar na Nota"]
+  ].map(([k, l]) => _chk("data-feat-pag", k, pags[k], l, "#f0fff4")).join("");
+
+  const chkFuncs = [
+    ["delivery", "🛵 Delivery"], ["retirada", "🏃 Retirada"], ["local", "🍽️ Comer no Local"],
+    ["balcao", "🏪 Mostrador/PDV"], ["cupons", "🎟️ Cupons"], ["factura", "🧾 Factura PY"],
+    ["multipagamento", "🔀 Multipagamento"], ["agendamento", "📅 Agendamento"]
+  ].map(([k, l]) => _chk("data-feat-func", k, funcs[k], l, "#fffbf0")).join("");
+
+  const _sec = (title, subtitle, grid, bg = "#fff") =>
+    `<div style="background:${bg};border:1.5px solid #e8eaf6;border-radius:12px;padding:16px 18px">
+      <h4 style="margin:0 0 4px;color:#2c3e50;font-size:0.93rem;font-weight:700">${title}</h4>
+      ${subtitle ? `<p style="font-size:0.78rem;color:#999;margin:0 0 10px">${subtitle}</p>` : "<div style='height:10px'></div>"}
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:7px">${grid}</div>
+    </div>`;
+
+  // 🔧 AQUI ESTÃO TODOS OS CARGOS (INCLUINDO SÓCIO E GARÇOM)
+  const CARGOS_UI = [
+    { key: "dono", label: "🔑 Dono", cor: "#f59e0b" },
+    { key: "gerente", label: "👔 Gerente", cor: "#2980b9" },
+    { key: "socio", label: "🤝 Sócio", cor: "#8e44ad" }, 
+    { key: "funcionario", label: "👷 Empleado", cor: "#7f8c8d" },
+    { key: "garcom", label: "🍽️ Mozo", cor: "#27ae60" }
+  ];
+  
+    const ABAS_UI = [
+    ["pedidos", "📋 Pedidos"], ["cozinha", "👨‍🍳 Cozinha"], ["pdv", "🖥️ PDV"],
+    ["financeiro", "💰 Financeiro"], ["inventario", "📦 Inventário"], ["produtos", "🍽️ Produtos"],
+    ["categorias", "🏷️ Categorias"], ["motoboys", "🏍️ Motoboys"], // <-- ADICIONADOS
+    ["equipe", "👥 Equipe"], ["configuracoes", "⚙️ Config"], ["dashboard", "📊 Dashboard"],
+    ["estatisticas", "📈 Estatísticas"], ["ficha-tecnica", "📝 Ficha Técnica"],
+    ["crm", "🤝 CRM"], ["mensalistas", "🗓️ Mensalistas"], ["turnos", "📺 Turnos"],
+    ["notas", "🧾 Notas"], ["facturacion", "🧮 Facturación"], ["filiais", "🏬 Filiais"]
+  ];
+  
+  const pCargos = f.permissoes_cargo || {};
+
+  const _chkPerm = (cargo, aba, label) => {
+    const perm = pCargos[cargo];
+    const isChecked = perm?.tabs ? perm.tabs.includes(aba) : true;
+    const cor = CARGOS_UI.find(c => c.key === cargo)?.cor || "#888";
+    return `<label style="display:flex;align-items:center;gap:5px;padding:5px 7px;
+        border-radius:7px;cursor:pointer;font-size:0.78rem;
+        background:${isChecked ? cor + "18" : "#f5f5f5"};
+        border:1.5px solid ${isChecked ? cor : "#ddd"};transition:all .15s">
+      <input type="checkbox" data-perm-tab="${aba}" data-perm-cargo="${cargo}"
+        ${isChecked ? "checked" : ""}
+        onchange="this.closest('label').style.background=this.checked?'${cor}18':'#f5f5f5';
+                  this.closest('label').style.borderColor=this.checked?'${cor}':'#ddd'"
+        style="width:14px;height:14px;accent-color:${cor};flex-shrink:0">
+      ${label}
+    </label>`;
+  };
+
+  // Gera a seção de cada cargo
+  const permSection = CARGOS_UI.map(({ key, label, cor }) => {
+    const perm = pCargos[key] || {};
+    const podeCancel = perm.pode_cancelar_direto === true;
+    const abasChk = ABAS_UI.map(([k, l]) => _chkPerm(key, k, l)).join("");
+    
+    return `<div style="border:2px solid ${cor}44;border-radius:12px;padding:14px 16px;background:#fff">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <span style="font-weight:700;font-size:0.92rem;color:${cor}">${label}</span>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;
+            font-size:0.8rem;font-weight:600;color:#c0392b;
+            background:${podeCancel ? "#fdecea" : "#f5f5f5"};
+            border:1.5px solid ${podeCancel ? "#e74c3c" : "#ddd"};
+            border-radius:8px;padding:5px 10px;transition:all .15s">
+          <input type="checkbox" data-perm-cancelar data-perm-cargo="${key}"
+            ${podeCancel ? "checked" : ""}
+            onchange="this.closest('label').style.background=this.checked?'#fdecea':'#f5f5f5';
+                      this.closest('label').style.borderColor=this.checked?'#e74c3c':'#ddd'"
+            style="width:14px;height:14px;accent-color:#e74c3c;flex-shrink:0">
+          ❌ Puede cancelar directamente
+        </label>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:5px">${abasChk}</div>
+    </div>`;
+  }).join("");
+
+  const html = `
+    <div style="display:grid;gap:14px">
+      ${_sec("📂 Abas visíveis (global)", "Controla o menu para todos os cargos via regra global.", chkTabs)}
+      ${_sec("💳 Formas de Pagamento", "App do cliente e PDV balcão", chkPags)}
+      ${_sec("🏷️ Tipos de Produto permitidos", "Quais tipos podem ser criados", chkTipos)}
+      ${_sec("⚙️ Funcionalidades", "Oculta recursos específicos", chkFuncs)}
+      
+      <div style="border:2px solid #e74c3c55;border-radius:14px;padding:16px 18px;background:#fffafa">
+        <h4 style="margin:0 0 4px;color:#c0392b;font-size:0.95rem;font-weight:800">
+          🔐 Permissões Granulares por Cargo
+        </h4>
+        <p style="font-size:0.78rem;color:#999;margin:0 0 14px">
+          Define qué pestañas puede ver cada cargo y si puede cancelar pedidos.
+        </p>
+        <div style="display:grid;gap:12px">${permSection}</div>
+      </div>
+      
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="salvarFeatures()" style="flex:1;min-width:160px">
+          <i class="fas fa-save"></i> Guardar Configuración
+        </button>
+        <button class="btn" onclick="renderPainelFeatures()"
+          style="background:#f0f4ff;color:#2c3e50;border:1.5px solid #c5cae9">
+          <i class="fas fa-sync"></i> Recarregar
+        </button>
+      </div>
+    </div>`;
+    
+  target.innerHTML = html;
 }
 
 function iniciarRealtime() {
@@ -1036,12 +1241,9 @@ async function carregarPedidos(silencioso = false) {
       })
       .eq("id", p.id);
   }
-  // ───────────────────────────────────────────────────────────────────────────
+  
+  const _podeCancel = _podeCancelarDireto();
 
-  // Badge de cancelamento pendente para o dono / adminMaster
-  const _podeCancel = ["dono", "adminMaster", "gerente"].includes(
-    perfilUsuario,
-  );
   const badgeCancelPendente = _podeCancel
     ? `<span style="background:#e74c3c;color:white;font-size:0.7rem;padding:2px 7px;border-radius:10px;margin-left:6px;vertical-align:middle;">CANC. PENDENTE</span>`
     : "";
@@ -2275,22 +2477,43 @@ async function calcularFinanceiro() {
     .from("pedidos")
     .select("*, motoboys(nome)")
     .neq("status", "cancelado")
-    .gte("created_at", utcI)
-    .lte("created_at", utcF);
-
-  if (tipoFiltro !== "todos") query = query.eq("forma_pagamento", tipoFiltro);
-
-  // Funcionário: filtra apenas pedidos relacionados ao seu usuário
-  // (via mesa/operador, se seu schema tiver esse campo — ajuste o campo se necessário)
-  // if (!ehGestor) query = query.eq("operador_email", emailAtual);
+    // Pega pedidos criados no período OU pedidos quitados no período
+    .or(`and(created_at.gte.${utcI},created_at.lte.${utcF}),and(quitado_em.gte.${utcI},quitado_em.lte.${utcF})`);
 
   const { data: pedidos } = await query;
   let peds = pedidos || [];
 
-  if (facturaFiltro === "com_factura")
+  // 🚨 O FILTRO MÁGICO DO NA NOTA 🚨
+  peds = peds.filter(p => {
+    const isNaNota = (p.forma_pagamento || "").toLowerCase() === "nanota";
+    if (isNaNota) {
+      // Se não tem data de quitação, ignora (ainda é fiado)
+      if (!p.quitado_em) return false;
+      
+      // Se foi quitado fora do período filtrado, ignora
+      const dtQuit = new Date(p.quitado_em).getTime();
+      const dtIni = new Date(utcI).getTime();
+      const dtFim = new Date(utcF).getTime();
+      if (dtQuit < dtIni || dtQuit > dtFim) return false;
+      
+      // Se passou, substitui a forma de pagamento para a que foi usada na quitação
+      p.forma_pagamento = p.forma_pagamento_quitacao || "Efetivo"; 
+    }
+    
+    // Aplica o filtro de pagamento do select (se houver)
+    if (tipoFiltro !== "todos") {
+      const pgto = (p.forma_pagamento || "").toLowerCase();
+      if (!pgto.includes(tipoFiltro.toLowerCase())) return false;
+    }
+    
+    return true;
+  });
+
+  if (facturaFiltro === "com_factura") {
     peds = peds.filter((p) => p.dados_factura?.ruc || p.dados_factura?.ci);
-  else if (facturaFiltro === "sem_factura")
+  } else if (facturaFiltro === "sem_factura") {
     peds = peds.filter((p) => !p.dados_factura?.ruc && !p.dados_factura?.ci);
+  }
 
   // ── 5. Movimentações de caixa da SESSÃO ──────────────────────────
 let caixa = [];
@@ -2334,7 +2557,7 @@ if (_sessaoCaixaAtiva) {
     qtdPedidos = 0;
   const motoMap = {};
 
-  peds.forEach((p) => {
+  pedsFiltrados.forEach((p) => {
     const val = safeNum(p.total_geral);
     faturamento += val;
     qtdPedidos++;
@@ -2400,7 +2623,7 @@ if (_sessaoCaixaAtiva) {
   let qtdItensSemCusto = 0;
   try {
     const prodIdsSet = new Set();
-    peds.forEach((p) => {
+    pedsFiltrados.forEach((p) => {
       (p.itens || []).forEach((i) => {
         const pid = i.produto_id || i.id || i.pid;
         if (pid) prodIdsSet.add(Number(pid));
@@ -2418,7 +2641,7 @@ if (_sessaoCaixaAtiva) {
       });
     }
     let custoTotal = 0;
-        peds.forEach((p) => {
+        pedsFiltrados.forEach((p) => {
       (p.itens || []).forEach((i) => {
         const pid = Number(i.produto_id || i.id || i.pid || 0);
         const qtd = i.qtd || i.q || 1;
@@ -3254,7 +3477,7 @@ async function carregarRelatorio() {
         '<span style="background:#f7f0e8;color:#6e4a1a;border-radius:10px;padding:2px 7px;font-size:0.68rem;font-weight:700">🚶 Retirada</span>',
     };
     const tipoBadge = tipoBadges[p.tipo_entrega] || "";
-    const _podeCancelRel = ["dono", "adminMaster", "gerente", "funcionario"].includes(perfilUsuario);
+    const _podeCancelRel = _podeCancelarDireto();
     const jaCancelado = p.status === "cancelado";
 
     // Timeline — PDV tem etapas diferentes
@@ -3529,16 +3752,16 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
     { data: movs, error: errMovs },
   ] = await Promise.all([
     supa.from("vw_sessao_resumo").select("*").eq("sessao_id", sessaoId).limit(1),
-    supa
+     supa
       .from("pedidos")
       .select(
         "subtotal, total_geral, frete_cobrado_cliente, frete_motoboy, " +
         "desconto_cupom, desconto_pdv_valor, cashback_valor, " +
-        "forma_pagamento, tipo_entrega, motoboy_id, motoboys(nome)",
+        "forma_pagamento, forma_pagamento_quitacao, quitado_em, tipo_entrega, motoboy_id, motoboys(nome)"
       )
       .neq("status", "cancelado")
-      .gte("created_at", inicioISO)
-      .lte("created_at", fimISO),
+      // Busca criados no período OU quitados no período
+      .or(`and(created_at.gte.${inicioISO},created_at.lte.${fimISO}),and(quitado_em.gte.${inicioISO},quitado_em.lte.${fimISO})`),
     supa
       .from("movimentacoes_caixa")
       .select("tipo, valor, tipo_despesa, descricao_outro")
@@ -3563,6 +3786,20 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
   }
 
   const peds = pedidosBrutos || [];
+  const pedsFiltrados = (pedidosBrutos || []).filter((p) => {
+    const isNaNota = (p.forma_pagamento || "").toLowerCase() === "nanota";
+    if (isNaNota) {
+      if (!p.quitado_em) return false;
+      const dtQuit = new Date(p.quitado_em).getTime();
+      const dtIni = new Date(inicioISO).getTime();
+      const dtFim = new Date(fimISO).getTime();
+      if (dtQuit < dtIni || dtQuit > dtFim) return false;
+      
+      // Troca a forma de pagamento para a forma da quitação
+      p.forma_pagamento = p.forma_pagamento_quitacao || "Efetivo";
+    }
+    return true;
+  });
   const movsArr = movs || [];
 
   // ═══════════════════════════════════════════════════════════════
@@ -3585,7 +3822,7 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
   let descontoTotal     = 0;
   const motoMap = {};
 
-  peds.forEach((p) => {
+  pedsFiltrados.forEach((p) => {
     const sub = safeNum(p.subtotal);
     const dc  = safeNum(p.desconto_cupom);
     const dp  = safeNum(p.desconto_pdv_valor);
@@ -3652,7 +3889,7 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
   let totalEfetivo = 0, totalPix = 0, totalCartao = 0;
   let totalCartaoBR = 0, totalTransf = 0, totalQrPy = 0, totalMulti = 0;
 
-  peds.forEach((p) => {
+  pedsFiltrados.forEach((p) => {
     const base = Math.max(
       0,
       safeNum(p.subtotal) - safeNum(p.desconto_cupom) -
@@ -10138,6 +10375,9 @@ async function carregarPDV() {
 
     _pdvRealocarBuscaParaTopo();
 
+    _pdvInjetarUiNaNota();
+
+
   // ⚠️ Revalida cache quando o operador volta o foco ao PDV.
   // Evita vender produto que esgotou enquanto a aba estava em background
   // (ex: operador trocou pra aba Pedidos e outro vendeu a última unidade).
@@ -12343,6 +12583,9 @@ function atualizarInfoPagPDV(total) {
   const infoBox = document.getElementById("balcao-pag-info");
   const boxMultiPDV = document.getElementById("box-multi-pdv");
   const selectPag = document.getElementById("balcao-pag");
+  _pdvToggleBlocoNaNota(pag);
+
+
   if (!infoBox) return;
 
   // Mostra/oculta campo Recebido + Troco conforme forma de pagamento
@@ -12853,11 +13096,17 @@ async function salvarPedidoBalcao() {
         : "Cartão BR - Crédito"
       : pag;
 
-  const nomeFinal = mesa
-    ? `MESA ${mesa} - ${cliente}`
-    : _soKg
-      ? `BALCÃO KG - ${cli}`
-      : `BALCÃO - ${cli}`;
+    // Substitua o bloco antigo por este:
+  let nomeFinal = "";
+  if (pag === "NaNota") {
+    nomeFinal = cli; // Salva APENAS o nome para o Fiado
+  } else {
+    nomeFinal = mesa 
+      ? `MESA ${mesa} - ${cli}` 
+      : _soKg 
+        ? `BALCÃO KG - ${cli}` 
+        : `BALCÃO - ${cli}`;
+  }
 
   // ── Desconto manual ──────────────────────────────────────────
   const descTipo =
@@ -12875,6 +13124,13 @@ async function salvarPedidoBalcao() {
         ? Math.round((subtotalBruto * descValRaw) / 100)
         : Math.round(descValRaw);
     descontoAplicado = Math.min(descontoAplicado, subtotalBruto); // não pode ser maior que o total
+  }
+
+  if (pag === "NaNota") {
+    if (!cli || cli.trim().toLowerCase() === "cliente" || !tel) {
+      alert("⚠️ Para lançar na nota (Fiado), é OBRIGATÓRIO informar o Nome e o Telefone do cliente.");
+      return; // Impede que a venda seja finalizada
+    }
   }
 
   // ── Tratamento Multipagamento ────────────────────────────────
@@ -13516,57 +13772,53 @@ document.addEventListener("keydown", function (event) {
 // =========================================
 async function carregarEquipe() {
   const { data } = await supa.from("perfis_acesso").select("*").order("cargo");
-
   const tbody = document.getElementById("lista-equipe");
   if (!tbody) return;
 
   tbody.innerHTML = "";
-  if (data) {
-    data.forEach((u) => {
-      const dataCriacao = u.created_at
-        ? new Date(u.created_at).toLocaleDateString("pt-BR")
-        : "-";
-      const ehDono = u.cargo === "dono";
-      const ehGerente = u.cargo === "gerente";
-      const ehFuncionario = u.cargo === "funcionario";
-      const ehGarcom = u.cargo === "garcom";
-      const ehAM = u.cargo === "adminMaster";
+  
+  if (data && data.length > 0) {
+    const cargoBadges = {
+      adminMaster: "🎮 Admin Master",
+      dono: "🔑 Dono",
+      gerente: "👔 Gerente",
+      socio: "🤝 Sócio", // <-- ADICIONADO AQUI
+      funcionario: "👷 Funcionário",
+      garcom: "🍽️ Garçom"
+    };
 
-      // Botão de promoção/rebaixamento
+    data.forEach((u) => {
+      const dataCriacao = u.created_at ? new Date(u.created_at).toLocaleDateString("pt-BR") : "-";
+      const isMe = u.id === _perfilId;
+      const isAM = u.cargo === "adminMaster";
+      const isDono = u.cargo === "dono";
+
+      // Botões de ação
       let acaoCargo = "";
-      if (
-        !ehAM &&
-        (perfilUsuario === "dono" || perfilUsuario === "adminMaster")
-      ) {
-        if (ehFuncionario || ehGarcom) {
+      if (!isAM && (perfilUsuario === "dono" || perfilUsuario === "adminMaster")) {
+        if (u.cargo === "funcionario" || u.cargo === "garcom" || u.cargo === "socio") {
           acaoCargo = `<button class="btn btn-sm btn-success" onclick="promoverUsuario('${u.id}', 'gerente')" title="Promover a Gerente"><i class="fas fa-arrow-up"></i> Gerente</button>`;
-        } else if (ehGerente) {
+        } else if (u.cargo === "gerente") {
           acaoCargo = `<button class="btn btn-sm btn-warning" onclick="promoverUsuario('${u.id}', 'funcionario')" title="Rebaixar a Funcionário"><i class="fas fa-arrow-down"></i> Funcionário</button>`;
         }
-        if (perfilUsuario === "adminMaster" && !ehDono) {
+        
+        if (perfilUsuario === "adminMaster" && !isDono) {
           acaoCargo += ` <button class="btn btn-sm btn-primary" onclick="promoverUsuario('${u.id}', 'dono')" title="Tornar Dono"><i class="fas fa-crown"></i> Dono</button>`;
         }
-        if (!ehDono) {
+        
+        // Não deixa excluir a si mesmo nem o dono principal
+        if (!isDono && !isMe) {
           acaoCargo += ` <button class="btn btn-sm btn-danger" onclick="excluirUsuario('${u.id}', '${u.email}')" title="Excluir"><i class="fas fa-trash"></i></button>`;
         }
       }
 
-      const cargoBadge = ehAM
-        ? "🎮 Admin Master"
-        : ehDono
-          ? "🔑 Dono"
-          : ehGerente
-            ? "👔 Gerente"
-            : ehGarcom
-              ? "🍽️ Garçom"
-              : "👷 Funcionário";
       tbody.innerHTML += `<tr>
-                <td><strong>${u.nome_display || "—"}</strong></td>
-                <td>${u.email}</td>
-                <td>${cargoBadge}</td>
-                <td>${dataCriacao}</td>
-                <td>${acaoCargo}</td>
-            </tr>`;
+        <td><strong>${u.nome_display || "—"}</strong></td>
+        <td>${u.email}</td>
+        <td>${cargoBadges[u.cargo] || u.cargo}</td>
+        <td>${dataCriacao}</td>
+        <td>${acaoCargo || '<span style="color:#aaa">—</span>'}</td>
+      </tr>`;
     });
   }
 }
@@ -13678,11 +13930,7 @@ async function amCarregarUsuarios() {
   if (!tbody) return;
   tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:16px"><i class="fas fa-spinner fa-spin"></i> Carregando...</td></tr>';
 
-  const { data, error } = await supa
-    .from("perfis_acesso")
-    .select("*")
-    .order("cargo");
-    
+  const { data, error } = await supa.from("perfis_acesso").select("*").order("cargo");
   if (error) {
     tbody.innerHTML = `<tr><td colspan="4" style="color:red;text-align:center">${error.message}</td></tr>`;
     return;
@@ -13707,23 +13955,13 @@ async function amCarregarUsuarios() {
       const isMe = u.id === _perfilId;
       const isAM = u.cargo === "adminMaster";
       
-      // Adicionado 'socio' nas opções do select
       const opcoesCargo = ["dono", "gerente", "socio", "funcionario", "garcom"]
         .map((c) => `<option value="${c}" ${u.cargo === c ? "selected" : ""}>${c}</option>`)
         .join("");
 
-      // Botão de permissões só aparece para o cargo 'socio'
-      const btnPermissoes = u.cargo === "socio"
-        ? `<button onclick="amAbrirModalPermissoes('${u.id}', '${u.email}')"
-            style="background:#8e44ad;color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:0.8rem;margin-right:8px;font-weight:bold">
-            🔐 Permissões
-          </button>`
-        : "";
-
       const acoes = isMe || isAM
         ? '<span style="color:#aaa;font-size:0.78rem">—</span>'
         : `
-      ${btnPermissoes}
       <select onchange="amAlterarCargo('${u.id}', this.value)" style="padding:4px 8px;border-radius:6px;border:1px solid #ddd;font-size:0.8rem;margin-right:6px">
         ${opcoesCargo}
       </select>
@@ -13783,109 +14021,6 @@ const _ABAS_DISPONIVEIS = [
   { key: "filiais",       label: "🏬 Filiais" },
 ];
 
-async function amAbrirModalPermissoes(userId, userEmail) {
-  if (perfilUsuario !== "adminMaster") return;
-
-  // Busca permissões atuais
-  const { data, error } = await supa
-    .from("perfis_acesso")
-    .select("permissoes_customizadas, nome_display")
-    .eq("id", userId)
-    .single();
-
-  if (error || !data) {
-    alert("Erro ao carregar permissões: " + (error?.message || "usuário não encontrado"));
-    return;
-  }
-
-  const atuais = data.permissoes_customizadas?.abas || [];
-  const nomeExibir = data.nome_display || userEmail;
-
-  document.getElementById("_modal-perm-socio")?.remove();
-
-  const overlay = document.createElement("div");
-  overlay.id = "_modal-perm-socio";
-  overlay.style.cssText = [
-    "position:fixed","inset:0","background:rgba(0,0,0,0.6)",
-    "z-index:99999","display:flex","align-items:center",
-    "justify-content:center","padding:16px","overflow-y:auto",
-  ].join(";");
-  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-
-  overlay.innerHTML = `
-    <div style="background:#fff;border-radius:18px;max-width:560px;width:100%;
-                max-height:92vh;overflow:hidden;display:flex;flex-direction:column;
-                box-shadow:0 24px 80px rgba(0,0,0,0.4)">
-      <div style="background:linear-gradient(135deg,#1e40af,#1e3a8a);color:#fff;
-                  padding:20px 24px;flex-shrink:0">
-        <div style="font-size:1.15rem;font-weight:800">🔐 Permissões do Sócio</div>
-        <div style="font-size:0.82rem;opacity:0.9;margin-top:4px">
-          <b>${nomeExibir}</b> — marque as abas que ele pode ver
-        </div>
-      </div>
-
-      <div style="padding:20px 24px;overflow-y:auto;flex:1">
-        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
-          <button type="button" onclick="_permMarcarTodas(true)"
-            style="padding:6px 14px;background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;
-                   border-radius:8px;font-weight:700;font-size:0.78rem;cursor:pointer">
-            ✓ Marcar todas
-          </button>
-          <button type="button" onclick="_permMarcarTodas(false)"
-            style="padding:6px 14px;background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;
-                   border-radius:8px;font-weight:700;font-size:0.78rem;cursor:pointer">
-            ✗ Limpar todas
-          </button>
-        </div>
-
-        <div id="_perm-checkboxes" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-          ${_ABAS_DISPONIVEIS.map((a) => `
-            <label style="display:flex;align-items:center;gap:8px;padding:8px 12px;
-                          background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;
-                          cursor:pointer;font-size:0.85rem;font-weight:600;color:#334155;
-                          transition:all .15s"
-              onmouseover="this.style.borderColor='#8e44ad'"
-              onmouseout="this.style.borderColor='#e2e8f0'">
-              <input type="checkbox" class="_perm-chk" value="${a.key}"
-                ${atuais.includes(a.key) ? "checked" : ""}
-                style="width:17px;height:17px;accent-color:#8e44ad;flex-shrink:0">
-              ${a.label}
-            </label>
-          `).join("")}
-        </div>
-
-        <div style="margin-top:18px;padding:12px 14px;background:#fffbeb;
-                    border:1px solid #fcd34d;border-radius:10px;font-size:0.78rem;color:#92400e">
-          ⚠️ <b>Admin Master</b> e <b>Assinatura</b> são sempre exclusivos do adminMaster —
-          mesmo que você marque, o Sócio não verá essas abas.
-        </div>
-      </div>
-
-      <div style="padding:16px 24px;border-top:1px solid #f0f0f0;background:#fafafa;
-                  display:flex;gap:10px;flex-shrink:0">
-        <button type="button" onclick="document.getElementById('_modal-perm-socio').remove()"
-          style="flex:1;padding:12px;background:#fff;color:#64748b;border:1.5px solid #e2e8f0;
-                 border-radius:10px;font-weight:700;font-size:0.88rem;cursor:pointer">
-          Cancelar
-        </button>
-        <button type="button" id="_perm-btn-salvar"
-          onclick="amSalvarPermissoes('${userId}')"
-          style="flex:2;padding:12px;background:linear-gradient(135deg,#8e44ad,#6b21a8);
-                 color:#fff;border:none;border-radius:10px;font-weight:800;font-size:0.9rem;
-                 cursor:pointer;box-shadow:0 4px 14px rgba(142,68,173,0.35)">
-          ✅ Salvar Permissões
-        </button>
-      </div>
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-
-  // Helper para "marcar/desmarcar todas"
-  window._permMarcarTodas = (valor) => {
-    document.querySelectorAll("._perm-chk").forEach((c) => (c.checked = valor));
-  };
-}
 
 async function amSalvarPermissoes(userId) {
   if (perfilUsuario !== "adminMaster") return;
@@ -19824,90 +19959,174 @@ async function _atualizarBadgePedidosPendentes() {
   return n;
 };
 
-async function amAbrirModalPermissoes(userId, userEmail) {
-  if (perfilUsuario !== "adminMaster") return;
+// ═══════════════════════════════════════════════════════════════
+//  LÓGICA DE CLIENTE PARA O FIADO (NA NOTA) NO PDV
+// ═══════════════════════════════════════════════════════════════
 
-  // Busca o que o sócio já tem liberado no banco
-  const { data, error } = await supa
-    .from("perfis_acesso")
-    .select("permissoes_customizadas, nome_display")
-    .eq("id", userId)
-    .single();
+// Mostra/oculta o bloco amarelo dependendo da forma de pagamento
+function _pdvToggleBlocoNaNota(pag) {
+  // Garante que o HTML do bloco Na Nota exista (injeção automática)
+  _pdvInjetarUiNaNota();
 
-  if (error) return alert("Erro ao carregar permissões: " + error.message);
+  const bloco = document.getElementById("pdv-bloco-nanota");
+  const dadosPadrao = document.getElementById("pdv-dados-padrao");
+  const painel = document.querySelector('.pdv-dir-dados');
+  const icon   = document.getElementById('pdv-toggle-dados-icon');
 
-  const atuais = data.permissoes_customizadas?.abas || [];
-  const nomeExibir = data.nome_display || userEmail;
-
-  // Lista de abas disponíveis para o Sócio
-  const abasDisponiveis = [
-    { key: "dashboard", label: "📊 Visão Geral" },
-    { key: "pdv", label: "🏪 PDV Mostrador" },
-    { key: "pedidos", label: "📋 Pedidos" },
-    { key: "cozinha", label: "🍳 Separação" },
-    { key: "equipe", label: "👥 Equipe" },
-    { key: "produtos", label: "🍽️ Produtos" },
-    { key: "categorias", label: "🏷️ Categorias" },
-    { key: "motoboys", label: "🏍️ Motoboys" },
-    { key: "financeiro", label: "💰 Financeiro" },
-    { key: "inventario", label: "📦 Inventário" },
-    { key: "estatisticas", label: "📈 Estatísticas" },
-    { key: "ficha-tecnica", label: "🧮 Ficha Técnica" },
-    { key: "crm", label: "👥 CRM Clientes" },
-    { key: "mensalistas", label: "📆 Mensalistas" },
-    { key: "configuracoes", label: "⚙️ Configurações" },
-    { key: "filiais", label: "🏬 Filiais" },
-  ];
-
-  document.getElementById("_modal-perm-socio")?.remove();
-
-  const overlay = document.createElement("div");
-  overlay.id = "_modal-perm-socio";
-  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;overflow-y:auto";
-  
-  overlay.innerHTML = `
-    <div style="background:#fff;border-radius:16px;max-width:600px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,0.4)">
-      <div style="background:linear-gradient(135deg,#8e44ad,#6b21a8);color:#fff;padding:20px 24px;border-radius:16px 16px 0 0">
-        <div style="font-size:1.2rem;font-weight:800">🔐 Permissões do Sócio</div>
-        <div style="font-size:0.85rem;opacity:0.9;margin-top:4px">Libere o acesso às abas para <b>${nomeExibir}</b></div>
-      </div>
+  if (bloco && dadosPadrao) {
+    if (pag === "NaNota") {
+      bloco.style.display = "block";
+      dadosPadrao.style.display = "none";
       
-      <div style="padding:20px 24px;overflow-y:auto;flex:1">
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-          ${abasDisponiveis.map(a => `
-            <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;cursor:pointer;font-size:0.85rem;font-weight:600;color:#334155">
-              <input type="checkbox" class="_perm-chk" value="${a.key}" ${atuais.includes(a.key) ? "checked" : ""} style="width:18px;height:18px;accent-color:#8e44ad">
-              ${a.label}
-            </label>
-          `).join("")}
+      // 🔧 Força o painel a abrir para o usuário ver o campo!
+      if (painel && !painel.classList.contains('pdv-dados-aberto')) {
+        painel.classList.add('pdv-dados-aberto');
+        if (icon) icon.className = 'fas fa-chevron-up';
+      }
+    } else {
+      bloco.style.display = "none";
+      dadosPadrao.style.display = "block";
+      pdvLimparClienteNaNota();
+    }
+  }
+}
+
+// Função que cria o HTML dinamicamente (não precisa editar o admin.html)
+function _pdvInjetarUiNaNota() {
+  const dadosContainer = document.querySelector(".pdv-dir-dados");
+  if (!dadosContainer) return;
+
+  // Se já existe, não cria de novo
+  if (document.getElementById("pdv-bloco-nanota")) return;
+
+  // Envolve os inputs de cliente/telefone antigos numa div #pdv-dados-padrao
+  if (!document.getElementById("pdv-dados-padrao")) {
+    const originalHTML = dadosContainer.innerHTML;
+    dadosContainer.innerHTML = `<div id="pdv-dados-padrao">${originalHTML}</div>`;
+  }
+
+  // Cria o bloco novo e insere no topo
+  const blocoHtml = `
+    <div id="pdv-bloco-nanota" style="display:none; background:#fffbeb; border:1.5px solid #fcd34d; border-radius:8px; padding:8px; margin-bottom:8px;">
+      <div style="font-size:0.75rem; font-weight:700; color:#92400e; margin-bottom:6px;">
+        📋 FIADO (NA NOTA) - CLIENTE OBRIGATÓRIO
+      </div>
+      <input type="text" id="pdv-busca-cliente-nanota" class="pdv-dir-input" placeholder="Buscar por nome ou telefone..." oninput="pdvBuscarClienteNaNota(this.value)" style="margin-bottom:6px; border-color:#fcd34d;">
+      <div id="pdv-lista-clientes-nanota" style="display:none; max-height:120px; overflow-y:auto; background:#fff; border:1px solid #e5e7eb; border-radius:6px; margin-bottom:6px;"></div>
+      
+      <div id="pdv-cliente-nanota-selecionado" style="display:none; background:#d1fae5; border:1px solid #10b981; border-radius:6px; padding:6px; margin-bottom:6px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <div id="pdv-nanota-nome" style="font-size:0.85rem; font-weight:700; color:#065f46;">-</div>
+            <div id="pdv-nanota-tel" style="font-size:0.75rem; color:#047857;">-</div>
+          </div>
+          <button type="button" onclick="pdvLimparClienteNaNota()" style="background:none;border:none;color:#ef4444;font-size:1.2rem;cursor:pointer;line-height:1;">×</button>
         </div>
       </div>
 
-      <div style="padding:16px 24px;border-top:1px solid #f0f0f0;background:#fafafa;display:flex;gap:10px;border-radius:0 0 16px 16px">
-        <button onclick="document.getElementById('_modal-perm-socio').remove()" style="flex:1;padding:12px;background:#fff;color:#64748b;border:1.5px solid #e2e8f0;border-radius:10px;font-weight:700;cursor:pointer">Cancelar</button>
-        <button onclick="amSalvarPermissoes('${userId}')" id="_btn-salvar-perm" style="flex:2;padding:12px;background:linear-gradient(135deg,#8e44ad,#6b21a8);color:#fff;border:none;border-radius:10px;font-weight:800;cursor:pointer">✅ Salvar Permissões</button>
-      </div>
+      <button type="button" onclick="pdvAbrirModalNovoClienteNaNota()" style="width:100%; padding:6px; background:#fff; color:#92400e; border:1px dashed #fcd34d; border-radius:6px; font-weight:700; font-size:0.75rem; cursor:pointer;">
+        + Cadastrar novo cliente
+      </button>
     </div>
   `;
-  document.body.appendChild(overlay);
+  dadosContainer.insertAdjacentHTML("afterbegin", blocoHtml);
 }
 
-async function amSalvarPermissoes(userId) {
-  const marcados = Array.from(document.querySelectorAll("._perm-chk:checked")).map(c => c.value);
-  const btn = document.getElementById("_btn-salvar-perm");
-  if (btn) { btn.disabled = true; btn.textContent = "Salvando..."; }
-
-  const { error } = await supa
-    .from("perfis_acesso")
-    .update({ permissoes_customizadas: { abas: marcados } })
-    .eq("id", userId);
-
-  if (error) {
-    alert("❌ Erro ao salvar: " + error.message);
-    if (btn) { btn.disabled = false; btn.textContent = "✅ Salvar Permissões"; }
+// Busca clientes no banco enquanto digita
+let _pdvTimeoutBuscaCliente;
+function pdvBuscarClienteNaNota(termo) {
+  clearTimeout(_pdvTimeoutBuscaCliente);
+  const lista = document.getElementById("pdv-lista-clientes-nanota");
+  
+  if (termo.length < 2) {
+    lista.style.display = "none";
     return;
   }
 
-  document.getElementById("_modal-perm-socio")?.remove();
-  alert("✅ Permissões atualizadas com sucesso!");
+  _pdvTimeoutBuscaCliente = setTimeout(async () => {
+    const { data, error } = await supa
+      .from("clientes")
+      .select("id, nome, telefone")
+      .or(`nome.ilike.%${termo}%,telefone.ilike.%${termo}%`)
+      .limit(10);
+
+    if (error || !data || data.length === 0) {
+      lista.innerHTML = '<div style="padding:8px; font-size:0.8rem; color:#888; text-align:center;">Nenhum cliente encontrado.</div>';
+      lista.style.display = "block";
+      return;
+    }
+
+    lista.innerHTML = data.map(c => `
+      <div style="padding:8px 10px; border-bottom:1px solid #f3f4f6; cursor:pointer; font-size:0.85rem;"
+           onclick="pdvSelecionarClienteNaNota('${c.nome.replace(/'/g, "\\'")}', '${c.telefone}')"
+           onmouseover="this.style.background='#f0fdf4'" onmouseout="this.style.background='#fff'">
+        <div style="font-weight:700; color:#333;">${c.nome}</div>
+        <div style="font-size:0.75rem; color:#888;">${c.telefone}</div>
+      </div>
+    `).join('');
+    lista.style.display = "block";
+  }, 400); // Espera 400ms para não sobrecarregar o banco
+}
+
+// Quando clica no nome do cliente na lista
+function pdvSelecionarClienteNaNota(nome, telefone) {
+  // Preenche os inputs reais que a função salvarPedidoBalcao() vai ler
+  document.getElementById("balcao-cliente").value = nome;
+  document.getElementById("balcao-telefone").value = telefone;
+  
+  // Atualiza o visual verde de selecionado
+  document.getElementById("pdv-nanota-nome").textContent = nome;
+  document.getElementById("pdv-nanota-tel").textContent = telefone;
+  document.getElementById("pdv-cliente-nanota-selecionado").style.display = "block";
+  
+  // Esconde a busca
+  document.getElementById("pdv-lista-clientes-nanota").style.display = "none";
+  document.getElementById("pdv-busca-cliente-nanota").value = "";
+}
+
+// Limpa a seleção
+function pdvLimparClienteNaNota() {
+  document.getElementById("balcao-cliente").value = "";
+  document.getElementById("balcao-telefone").value = "";
+  document.getElementById("pdv-cliente-nanota-selecionado").style.display = "none";
+  document.getElementById("pdv-busca-cliente-nanota").value = "";
+  document.getElementById("pdv-lista-clientes-nanota").style.display = "none";
+}
+
+// Cadastra um novo cliente direto no PDV
+function pdvAbrirModalNovoClienteNaNota() {
+  const nome = prompt("Nome do novo cliente:");
+  if (!nome || !nome.trim()) return;
+
+  const tel = prompt("Telefone do cliente (com DDD/País):");
+  if (!tel || !tel.trim()) return;
+
+  _pdvSalvarNovoClienteNaNota(nome.trim(), tel.trim());
+}
+
+async function _pdvSalvarNovoClienteNaNota(nome, telefone) {
+  try {
+    // Verifica se já existe para não duplicar
+    const { data: existente } = await supa
+      .from("clientes")
+      .select("id")
+      .eq("telefone", telefone)
+      .maybeSingle();
+
+    if (!existente) {
+      await supa.from("clientes").insert([{ nome, telefone }]);
+    }
+
+    // Seleciona automaticamente
+    pdvSelecionarClienteNaNota(nome, telefone);
+    
+    // Toast de sucesso
+    if (typeof mostrarToast === "function") {
+      mostrarToast(`Cliente "${nome}" cadastrado!`, "success", 2500);
+    } else {
+      alert(`✅ Cliente "${nome}" cadastrado!`);
+    }
+  } catch (e) {
+    alert("Erro ao cadastrar cliente: " + e.message);
+  }
 }
