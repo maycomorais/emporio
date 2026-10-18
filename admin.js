@@ -635,14 +635,17 @@ let _permissoesSocio = null;
  */
 async function _carregarPermissoesSocio() {
   try {
-    const { data, error } = await supa.rpc("get_minhas_abas");
-    if (error) {
-      console.warn("[Sócio] RPC get_minhas_abas falhou:", error.message);
-      _permissoesSocio = { abas: [] };  // nega tudo por padrão
-      return;
-    }
+    const { data, error } = await supa
+      .from("perfis_acesso")
+      .select("permissoes_customizadas")
+      .eq("id", _perfilId)
+      .single();
+
+    if (error) throw error;
+    
+    // Se não houver nada salvo, o padrão é um array vazio (não vê nada além do dashboard)
     _permissoesSocio = {
-      abas: Array.isArray(data) ? data : [],
+      abas: data?.permissoes_customizadas?.abas || [],
     };
     console.log("[Sócio] Permissões carregadas:", _permissoesSocio.abas);
   } catch (e) {
@@ -13673,58 +13676,53 @@ async function amCarregarUsuarios() {
   if (perfilUsuario !== "adminMaster") return;
   const tbody = document.getElementById("am-lista-usuarios");
   if (!tbody) return;
-  tbody.innerHTML =
-    '<tr><td colspan="4" style="text-align:center;padding:16px"><i class="fas fa-spinner fa-spin"></i> Carregando...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:16px"><i class="fas fa-spinner fa-spin"></i> Carregando...</td></tr>';
 
   const { data, error } = await supa
     .from("perfis_acesso")
     .select("*")
     .order("cargo");
+    
   if (error) {
     tbody.innerHTML = `<tr><td colspan="4" style="color:red;text-align:center">${error.message}</td></tr>`;
     return;
   }
 
   if (!data || !data.length) {
-    tbody.innerHTML =
-      '<tr><td colspan="4" style="text-align:center;color:#aaa">Nenhum usuário cadastrado</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#aaa">Nenhum usuário cadastrado</td></tr>';
     return;
   }
 
   const cargoBadges = {
-    adminMaster:
-      '<span style="background:#e74c3c;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">🎮 Admin Master</span>',
+    adminMaster: '<span style="background:#e74c3c;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">🎮 Admin Master</span>',
     dono: '<span style="background:#f39c12;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">🔑 Dono</span>',
-    gerente:
-      '<span style="background:#2980b9;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">👔 Gerente</span>',
-    funcionario:
-      '<span style="background:#7f8c8d;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">👷 Funcionário</span>',
-    garcom:
-      '<span style="background:#27ae60;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">🍽️ Garçom</span>',
+    gerente: '<span style="background:#2980b9;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">👔 Gerente</span>',
+    socio: '<span style="background:#8e44ad;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">🤝 Sócio</span>',
+    funcionario: '<span style="background:#7f8c8d;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">👷 Funcionário</span>',
+    garcom: '<span style="background:#27ae60;color:#fff;padding:2px 8px;border-radius:10px;font-size:0.75rem">🍽️ Garçom</span>',
   };
 
   tbody.innerHTML = data
     .map((u) => {
       const isMe = u.id === _perfilId;
       const isAM = u.cargo === "adminMaster";
-      const opcoesCargo = ["dono", "gerente", "funcionario", "garcom"]
-        .map(
-          (c) =>
-            `<option value="${c}" ${u.cargo === c ? "selected" : ""}>${c}</option>`,
-        )
+      
+      // Adicionado 'socio' nas opções do select
+      const opcoesCargo = ["dono", "gerente", "socio", "funcionario", "garcom"]
+        .map((c) => `<option value="${c}" ${u.cargo === c ? "selected" : ""}>${c}</option>`)
         .join("");
-            const btnPermissoes = u.cargo === "socio"
-        ? `<button onclick="amAbrirModalPermissoes('${u.id}','${u.email.replace(/'/g, "\\'")}')"
-            style="background:#8e44ad;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:0.8rem;margin-right:6px"
-            title="Editar abas visíveis">
+
+      // Botão de permissões só aparece para o cargo 'socio'
+      const btnPermissoes = u.cargo === "socio"
+        ? `<button onclick="amAbrirModalPermissoes('${u.id}', '${u.email}')"
+            style="background:#8e44ad;color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:0.8rem;margin-right:8px;font-weight:bold">
             🔐 Permissões
           </button>`
         : "";
 
-      const acoes =
-        isMe || isAM
-          ? '<span style="color:#aaa;font-size:0.78rem">—</span>'
-          : `
+      const acoes = isMe || isAM
+        ? '<span style="color:#aaa;font-size:0.78rem">—</span>'
+        : `
       ${btnPermissoes}
       <select onchange="amAlterarCargo('${u.id}', this.value)" style="padding:4px 8px;border-radius:6px;border:1px solid #ddd;font-size:0.8rem;margin-right:6px">
         ${opcoesCargo}
@@ -13733,6 +13731,7 @@ async function amCarregarUsuarios() {
         style="background:#e74c3c;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:0.8rem">
         <i class="fas fa-trash"></i>
       </button>`;
+
       return `<tr>
       <td><strong>${u.nome_display || "—"}</strong>${isMe ? ' <span style="font-size:0.7rem;color:#27ae60">(você)</span>' : ""}</td>
       <td style="font-size:0.85rem">${u.email}</td>
@@ -19824,3 +19823,91 @@ async function _atualizarBadgePedidosPendentes() {
 
   return n;
 };
+
+async function amAbrirModalPermissoes(userId, userEmail) {
+  if (perfilUsuario !== "adminMaster") return;
+
+  // Busca o que o sócio já tem liberado no banco
+  const { data, error } = await supa
+    .from("perfis_acesso")
+    .select("permissoes_customizadas, nome_display")
+    .eq("id", userId)
+    .single();
+
+  if (error) return alert("Erro ao carregar permissões: " + error.message);
+
+  const atuais = data.permissoes_customizadas?.abas || [];
+  const nomeExibir = data.nome_display || userEmail;
+
+  // Lista de abas disponíveis para o Sócio
+  const abasDisponiveis = [
+    { key: "dashboard", label: "📊 Visão Geral" },
+    { key: "pdv", label: "🏪 PDV Mostrador" },
+    { key: "pedidos", label: "📋 Pedidos" },
+    { key: "cozinha", label: "🍳 Separação" },
+    { key: "equipe", label: "👥 Equipe" },
+    { key: "produtos", label: "🍽️ Produtos" },
+    { key: "categorias", label: "🏷️ Categorias" },
+    { key: "motoboys", label: "🏍️ Motoboys" },
+    { key: "financeiro", label: "💰 Financeiro" },
+    { key: "inventario", label: "📦 Inventário" },
+    { key: "estatisticas", label: "📈 Estatísticas" },
+    { key: "ficha-tecnica", label: "🧮 Ficha Técnica" },
+    { key: "crm", label: "👥 CRM Clientes" },
+    { key: "mensalistas", label: "📆 Mensalistas" },
+    { key: "configuracoes", label: "⚙️ Configurações" },
+    { key: "filiais", label: "🏬 Filiais" },
+  ];
+
+  document.getElementById("_modal-perm-socio")?.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "_modal-perm-socio";
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px;overflow-y:auto";
+  
+  overlay.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:600px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,0.4)">
+      <div style="background:linear-gradient(135deg,#8e44ad,#6b21a8);color:#fff;padding:20px 24px;border-radius:16px 16px 0 0">
+        <div style="font-size:1.2rem;font-weight:800">🔐 Permissões do Sócio</div>
+        <div style="font-size:0.85rem;opacity:0.9;margin-top:4px">Libere o acesso às abas para <b>${nomeExibir}</b></div>
+      </div>
+      
+      <div style="padding:20px 24px;overflow-y:auto;flex:1">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${abasDisponiveis.map(a => `
+            <label style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;cursor:pointer;font-size:0.85rem;font-weight:600;color:#334155">
+              <input type="checkbox" class="_perm-chk" value="${a.key}" ${atuais.includes(a.key) ? "checked" : ""} style="width:18px;height:18px;accent-color:#8e44ad">
+              ${a.label}
+            </label>
+          `).join("")}
+        </div>
+      </div>
+
+      <div style="padding:16px 24px;border-top:1px solid #f0f0f0;background:#fafafa;display:flex;gap:10px;border-radius:0 0 16px 16px">
+        <button onclick="document.getElementById('_modal-perm-socio').remove()" style="flex:1;padding:12px;background:#fff;color:#64748b;border:1.5px solid #e2e8f0;border-radius:10px;font-weight:700;cursor:pointer">Cancelar</button>
+        <button onclick="amSalvarPermissoes('${userId}')" id="_btn-salvar-perm" style="flex:2;padding:12px;background:linear-gradient(135deg,#8e44ad,#6b21a8);color:#fff;border:none;border-radius:10px;font-weight:800;cursor:pointer">✅ Salvar Permissões</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+
+async function amSalvarPermissoes(userId) {
+  const marcados = Array.from(document.querySelectorAll("._perm-chk:checked")).map(c => c.value);
+  const btn = document.getElementById("_btn-salvar-perm");
+  if (btn) { btn.disabled = true; btn.textContent = "Salvando..."; }
+
+  const { error } = await supa
+    .from("perfis_acesso")
+    .update({ permissoes_customizadas: { abas: marcados } })
+    .eq("id", userId);
+
+  if (error) {
+    alert("❌ Erro ao salvar: " + error.message);
+    if (btn) { btn.disabled = false; btn.textContent = "✅ Salvar Permissões"; }
+    return;
+  }
+
+  document.getElementById("_modal-perm-socio")?.remove();
+  alert("✅ Permissões atualizadas com sucesso!");
+}
