@@ -2451,32 +2451,19 @@ async function calcularFinanceiro() {
   // ── 1. Carrega/verifica sessão ativa ─────────────────────────────
   await _carregarSessaoCaixa();
 
-  // // ── 2. Se não houver sessão aberta, exibe alerta de abertura ─────
-  // if (!_sessaoCaixaAtiva) {
-  //   _exibirAlertaAberturaCaixa();
-  //   return; // não renderiza nada enquanto não houver sessão
-  // }
-
   // ── 3. Define intervalo de tempo baseado na SESSÃO, não no calendário ─
   const hoje = new Date().toISOString().split("T")[0];
   const sessaoInicio = (elInicio.value || hoje) + "T00:00:00";
   const sessaoFim    = (elFim.value   || hoje) + "T23:59:59";
 
   // Gestores podem sobrepor o intervalo com o filtro de datas da tela.
-  // NOTA DE FUSO: o Supabase armazena UTC. Assunção é UTC-3 permanente desde 2024.
-  // Ao converter a data local do filtro, usamos _getAsuncionOffsetMs para obter UTC correto.
   let utcI = sessaoInicio;
   let utcF = sessaoFim;
   if (ehGestor && elInicio.value && elFim.value) {
-    // Determina o offset de Assunção dinamicamente via Intl
     const _refDate = new Date(elInicio.value + "T12:00:00");
     const _asunOffset = _getAsuncionOffsetMs(_refDate);
-    utcI = new Date(
-      new Date(elInicio.value + "T00:00:00").getTime() + _asunOffset,
-    ).toISOString();
-    utcF = new Date(
-      new Date(elFim.value + "T23:59:59").getTime() + _asunOffset,
-    ).toISOString();
+    utcI = new Date(new Date(elInicio.value + "T00:00:00").getTime() + _asunOffset).toISOString();
+    utcF = new Date(new Date(elFim.value + "T23:59:59").getTime() + _asunOffset).toISOString();
   } else if (!elInicio.value || !elFim.value) {
     const hoje = new Date().toISOString().split("T")[0];
     if (!elInicio.value) elInicio.value = hoje;
@@ -2487,13 +2474,10 @@ async function calcularFinanceiro() {
   const facturaFiltro = elFactura ? elFactura.value : "todos";
 
   // ── 4. Busca pedidos dentro da janela da sessão ───────────────────
-  // Inclui TODOS os status exceto cancelado — pedidos do app chegam como
-  // "pendente" ou "em_preparo" e devem ser contabilizados no caixa do dia.
   let query = supa
     .from("pedidos")
     .select("*, motoboys(nome)")
     .neq("status", "cancelado")
-    // Pega pedidos criados no período OU pedidos quitados no período
     .or(`and(created_at.gte.${utcI},created_at.lte.${utcF}),and(quitado_em.gte.${utcI},quitado_em.lte.${utcF})`);
 
   const { data: pedidos } = await query;
@@ -2503,20 +2487,16 @@ async function calcularFinanceiro() {
   peds = peds.filter(p => {
     const isNaNota = (p.forma_pagamento || "").toLowerCase() === "nanota";
     if (isNaNota) {
-      // Se não tem data de quitação, ignora (ainda é fiado)
       if (!p.quitado_em) return false;
       
-      // Se foi quitado fora do período filtrado, ignora
       const dtQuit = new Date(p.quitado_em).getTime();
       const dtIni = new Date(utcI).getTime();
       const dtFim = new Date(utcF).getTime();
       if (dtQuit < dtIni || dtQuit > dtFim) return false;
       
-      // Se passou, substitui a forma de pagamento para a que foi usada na quitação
       p.forma_pagamento = p.forma_pagamento_quitacao || "Efetivo"; 
     }
     
-    // Aplica o filtro de pagamento do select (se houver)
     if (tipoFiltro !== "todos") {
       const pgto = (p.forma_pagamento || "").toLowerCase();
       if (!pgto.includes(tipoFiltro.toLowerCase())) return false;
@@ -2532,48 +2512,33 @@ async function calcularFinanceiro() {
   }
 
   // ── 5. Movimentações de caixa da SESSÃO ──────────────────────────
-let caixa = [];
-if (_sessaoCaixaAtiva) {
-  let caixaQuery = supa
-    .from("movimentacoes_caixa")
-    .select("*")
-    .eq("sessao_id", _sessaoCaixaAtiva.id);
-  if (!ehGestor) caixaQuery = caixaQuery.eq("usuario_email", emailAtual);
-  const { data: caixaData } = await caixaQuery;
-  caixa = caixaData || [];
-}
+  let caixa = [];
+  if (_sessaoCaixaAtiva) {
+    let caixaQuery = supa
+      .from("movimentacoes_caixa")
+      .select("*")
+      .eq("sessao_id", _sessaoCaixaAtiva.id);
+    if (!ehGestor) caixaQuery = caixaQuery.eq("usuario_email", emailAtual);
+    const { data: caixaData } = await caixaQuery;
+    caixa = caixaData || [];
+  }
 
-  // Verifica bloqueio de caixa (sangria limite)
   _verificarBloqueioCaixa(emailAtual);
 
-  // ── 6. Cálculos (inalterado) ──────────────────────────────────────
+  // ── 6. Cálculos ─────────────────────────────────────────────────────
   const safeNum = (v) => {
     if (!v) return 0;
     if (typeof v === "number") return v;
-    return (
-      parseFloat(
-        v
-          .toString()
-          .replace(/[^\d.,-]/g, "")
-          .replace(",", "."),
-      ) || 0
-    );
+    return parseFloat(v.toString().replace(/[^\d.,-]/g, "").replace(",", ".")) || 0;
   };
   const fmt = (n) => "Gs " + n.toLocaleString("es-PY");
 
-  let faturamento = 0,
-    totalPix = 0,
-    totalTransf = 0,
-    totalCartao = 0,
-    totalEfetivo = 0,
-    totalQrPy = 0,
-    totalCartaoBR = 0,
-    totalMultiOutros = 0;
-  let custoEntregas = 0,
-    qtdPedidos = 0;
+  let faturamento = 0, totalPix = 0, totalTransf = 0, totalCartao = 0, totalEfetivo = 0, totalQrPy = 0, totalCartaoBR = 0, totalMultiOutros = 0;
+  let custoEntregas = 0, qtdPedidos = 0;
   const motoMap = {};
 
-  pedsFiltrados.forEach((p) => {
+  // CORRIGIDO: peds.forEach
+  peds.forEach((p) => {
     const val = safeNum(p.total_geral);
     faturamento += val;
     qtdPedidos++;
@@ -2583,7 +2548,7 @@ if (_sessaoCaixaAtiva) {
     // ── Multipagamento: distribui pelos métodos reais gravados em obs_pagamento ──
     if (pag === "multipagamento" && obsPag) {
       try {
-        const partes = JSON.parse(obsPag); // [{ metodo, valor }, ...] — campo legado: forma
+        const partes = JSON.parse(obsPag);
         if (Array.isArray(partes)) {
           partes.forEach((parte) => {
             const pf = (parte.metodo || parte.forma || "").toLowerCase();
@@ -2596,10 +2561,10 @@ if (_sessaoCaixaAtiva) {
             else                                                       totalEfetivo += pv;
           });
         } else {
-          totalMultiOutros += val; // JSON malformado — conta separado
+          totalMultiOutros += val;
         }
       } catch (_) {
-        totalMultiOutros += val; // obs_pagamento não é JSON (texto livre)
+        totalMultiOutros += val;
       }
     }
     // ── Pagamentos simples ──────────────────────────────────────────────────
@@ -2610,6 +2575,7 @@ if (_sessaoCaixaAtiva) {
     else if (pag.includes("cartao") || pag.includes("cartão"))      totalCartao  += val;
     else if (pag.includes("efetivo") || pag.includes("dinheiro"))   totalEfetivo += val;
     else                                                             totalMultiOutros += val;
+    
     if (p.tipo_entrega === "delivery") {
       const taxa = safeNum(p.frete_motoboy) || TAXA_MOTOBOY || 0;
       custoEntregas += taxa;
@@ -2620,18 +2586,10 @@ if (_sessaoCaixaAtiva) {
     }
   });
 
-  const qtdMotoboyUnicos = Object.keys(motoMap).filter(
-    (n) => n !== "Sem Motoboy",
-  ).length;
+  const qtdMotoboyUnicos = Object.keys(motoMap).filter((n) => n !== "Sem Motoboy").length;
   custoEntregas += (AJUDA_COMBUSTIVEL || 0) * qtdMotoboyUnicos;
 
-  // ── Lucro sobre Vendas (usando preco_compra cadastrado nos produtos) ──
-  // ATENÇÃO: este cálculo só considera itens cujo produto tem preco_compra
-  // cadastrado. Itens SEM preco_compra são excluídos do cálculo (não dá
-  // pra estimar lucro sem custo) — mas isso significa que o markup exibido
-  // é uma média APENAS dos produtos com custo cadastrado, não de 100% das
-  // vendas. Por isso agora rastreamos e exibimos a cobertura (% do
-  // faturamento que entrou no cálculo), para não dar falsa precisão.
+  // ── Lucro sobre Vendas ──
   let lucroBrutoVendas = 0;
   let markupMedioVendas = null;
   let faturamentoComCusto = 0;
@@ -2639,12 +2597,15 @@ if (_sessaoCaixaAtiva) {
   let qtdItensSemCusto = 0;
   try {
     const prodIdsSet = new Set();
-    pedsFiltrados.forEach((p) => {
+    
+    // CORRIGIDO: peds.forEach
+    peds.forEach((p) => {
       (p.itens || []).forEach((i) => {
         const pid = i.produto_id || i.id || i.pid;
         if (pid) prodIdsSet.add(Number(pid));
       });
     });
+    
     const prodIds = Array.from(prodIdsSet);
     let precosCompra = {};
     if (prodIds.length > 0) {
@@ -2656,22 +2617,19 @@ if (_sessaoCaixaAtiva) {
         if (pr.preco_compra) precosCompra[pr.id] = pr.preco_compra;
       });
     }
+    
     let custoTotal = 0;
-        pedsFiltrados.forEach((p) => {
+    
+    // CORRIGIDO: peds.forEach
+    peds.forEach((p) => {
       (p.itens || []).forEach((i) => {
         const pid = Number(i.produto_id || i.id || i.pid || 0);
         const qtd = i.qtd || i.q || 1;
         const precoVenda = safeNum(i.preco || i.p || 0);
         const precoCompraKg = precosCompra[pid] || 0;
 
-        // 🔧 Item vendido por peso: `preco` já é o TOTAL cobrado
-        // (preco_kg × peso_gramas / 1000), mas `preco_compra` é por kg.
-        // Precisa converter o custo para a mesma fração de peso antes
-        // de subtrair — senão o lucro vira um prejuízo fictício.
         const _isItemKg = i._isKg === true || Number(i.peso_gramas) > 0;
-        const _fracaoKg = _isItemKg
-          ? Number(i.peso_gramas || 0) / 1000
-          : 1;
+        const _fracaoKg = _isItemKg ? Number(i.peso_gramas || 0) / 1000 : 1;
         const precoCompra = precoCompraKg * _fracaoKg;
 
         const valorItem = precoVenda * qtd;
@@ -2680,8 +2638,6 @@ if (_sessaoCaixaAtiva) {
           custoTotal += precoCompra * qtd;
           faturamentoComCusto += valorItem;
         } else if (precoVenda > 0) {
-          // Item vendido mas sem preco_compra cadastrado — fica de fora
-          // do cálculo de lucro. Contabiliza para mostrar a cobertura real.
           faturamentoSemCusto += valorItem;
           qtdItensSemCusto++;
         }
@@ -2693,7 +2649,6 @@ if (_sessaoCaixaAtiva) {
     console.warn("Erro calcular lucro vendas:", e);
   }
 
-  // % do faturamento de itens que efetivamente entrou no cálculo de lucro
   const _baseCobertura = faturamentoComCusto + faturamentoSemCusto;
   const coberturaLucroPct =
     _baseCobertura > 0
@@ -2744,13 +2699,9 @@ if (_sessaoCaixaAtiva) {
   setV("card-custo-moto", fmt(custoEntregas));
   setV("card-lucro", fmt(lucro));
   setV("card-lucro-vendas", fmt(lucroBrutoVendas || 0));
+  
   const elLvPct = document.getElementById("card-lucro-vendas-pct");
   if (elLvPct) {
-    // Avisa quando o markup foi calculado sobre só uma fração das vendas
-    // (produtos sem preco_compra cadastrado ficam fora da conta) — isso
-    // evita comparar números de cobertura diferente entre lojas/sistemas
-    // e achar que o lucro "não bate" quando na verdade é a base de cálculo
-    // que é diferente.
     const avisoCobertura =
       coberturaLucroPct !== null && coberturaLucroPct < 95
         ? ` · cálculo cobre só ${coberturaLucroPct}% das vendas (${qtdItensSemCusto} item(s) sem custo cadastrado)`
@@ -2768,6 +2719,7 @@ if (_sessaoCaixaAtiva) {
       elLvPct.textContent = "cadastre o preço de compra nos produtos";
     }
   }
+  
   setV("total-pix", fmt(totalPix));
   setV("total-transf", fmt(totalTransf));
   setV("total-cartao", fmt(totalCartao));
@@ -2778,33 +2730,31 @@ if (_sessaoCaixaAtiva) {
   setV("card-qtd-pedidos", qtdPedidos);
   setV("card-ticket-medio", fmt(qtdPedidos > 0 ? faturamento / qtdPedidos : 0));
 
-  // Badge do operador / info da sessão
   const badgeCaixa = document.getElementById("badge-caixa-operador");
-if (badgeCaixa) {
-  if (_sessaoCaixaAtiva) {
-    const dAbr = new Date(_sessaoCaixaAtiva.aberto_em).toLocaleString("pt-BR", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-    const dFch = _sessaoCaixaAtiva.fechado_em
-      ? new Date(_sessaoCaixaAtiva.fechado_em).toLocaleString("pt-BR", {
-          day: "2-digit",
-          month: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : "em aberto";
-    badgeCaixa.textContent = ehGestor
-      ? `📊 Visão geral — sessão ${_sessaoCaixaAtiva.id} (${_sessaoCaixaAtiva.usuario_email}) · ${dAbr} → ${dFch}`
-      : `💼 Seu caixa — aberto ${dAbr} → ${dFch}`;
-  } else {
-    badgeCaixa.textContent = "📊 Sem sessão de caixa ativa — exibindo todos os pedidos do período";
+  if (badgeCaixa) {
+    if (_sessaoCaixaAtiva) {
+      const dAbr = new Date(_sessaoCaixaAtiva.aberto_em).toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const dFch = _sessaoCaixaAtiva.fechado_em
+        ? new Date(_sessaoCaixaAtiva.fechado_em).toLocaleString("pt-BR", {
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : "em aberto";
+      badgeCaixa.textContent = ehGestor
+        ? `📊 Visão geral — sessão ${_sessaoCaixaAtiva.id} (${_sessaoCaixaAtiva.usuario_email}) · ${dAbr} → ${dFch}`
+        : `💼 Seu caixa — aberto ${dAbr} → ${dFch}`;
+    } else {
+      badgeCaixa.textContent = "📊 Sem sessão de caixa ativa — exibindo todos os pedidos do período";
+    }
   }
-}
 
-  // Tabelas de despesas e motoboys (código original preservado)
   const tbD = document.getElementById("lista-despesas-caixa");
   if (tbD) {
     const despesas = (caixa || []).filter((c) => c.tipo === "despesa");
@@ -2881,11 +2831,10 @@ if (badgeCaixa) {
     }
   }
 
-  // ── Relatório Detalhado de Vendas: popula com os pedidos já carregados ──
-  // Não faz nova query ao banco — reutiliza `peds` (já filtrados por data e forma de pagamento).
+  // ── Relatório Detalhado de Vendas ──
   _finRelPopular(peds);
 
-  // ── Histórico de Boletins de Fechamento (card novo) ──
+  // ── Histórico de Boletins de Fechamento ──
   carregarHistoricoFechamentos();
 }
 
