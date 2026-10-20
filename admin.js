@@ -3961,60 +3961,43 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
     if (!v) return 0;
     if (typeof v === "number") return v;
     return (
-      parseFloat(
-        String(v)
-          .replace(/[^\d.,-]/g, "")
-          .replace(",", "."),
-      ) || 0
+      parseFloat(String(v).replace(/[^\d.,-]/g, "").replace(",", ".")) || 0
     );
   };
 
   // ── 1. Busca em paralelo ────────────────────────────────────────
+  // AQUI FOI A PRIMEIRA CORREÇÃO: Adicionado 'obs_pagamento' no select
   const [
     { data: rows, error },
     { data: pedidosBrutos, error: errPedidos },
     { data: movs, error: errMovs },
   ] = await Promise.all([
-    supa
-      .from("vw_sessao_resumo")
-      .select("*")
-      .eq("sessao_id", sessaoId)
-      .limit(1),
-    supa
+    supa.from("vw_sessao_resumo").select("*").eq("sessao_id", sessaoId).limit(1),
+     supa
       .from("pedidos")
       .select(
         "subtotal, total_geral, frete_cobrado_cliente, frete_motoboy, " +
-          "desconto_cupom, desconto_pdv_valor, cashback_valor, " +
-          "forma_pagamento, forma_pagamento_quitacao, quitado_em, tipo_entrega, motoboy_id, motoboys(nome)",
+        "desconto_cupom, desconto_pdv_valor, cashback_valor, " +
+        "forma_pagamento, forma_pagamento_quitacao, quitado_em, obs_pagamento, tipo_entrega, motoboy_id, motoboys(nome)"
       )
       .neq("status", "cancelado")
-      // Busca criados no período OU quitados no período
-      .or(
-        `and(created_at.gte.${inicioISO},created_at.lte.${fimISO}),and(quitado_em.gte.${inicioISO},quitado_em.lte.${fimISO})`,
-      ),
+      .or(`and(created_at.gte.${inicioISO},created_at.lte.${fimISO}),and(quitado_em.gte.${inicioISO},quitado_em.lte.${fimISO})`),
     supa
       .from("movimentacoes_caixa")
       .select("tipo, valor, tipo_despesa, descricao_outro")
       .eq("sessao_id", sessaoId),
   ]);
 
-  // 🔧 Antes, erros em pedidos/movs eram silenciados e o fechamento
-  //    saía zerado sem aviso. Agora: loga + avisa o operador.
   if (errPedidos) {
     console.error("[Fechamento] Erro ao buscar pedidos:", errPedidos.message);
     alert(
       "⚠️ Não foi possível buscar os pedidos desta sessão.\n\n" +
-        "Motivo: " +
-        errPedidos.message +
-        "\n\n" +
-        "O fechamento será exibido, mas os valores podem estar zerados.",
+      "Motivo: " + errPedidos.message + "\n\n" +
+      "O fechamento será exibido, mas os valores podem estar zerados."
     );
   }
   if (errMovs) {
-    console.error(
-      "[Fechamento] Erro ao buscar movimentações:",
-      errMovs.message,
-    );
+    console.error("[Fechamento] Erro ao buscar movimentações:", errMovs.message);
   }
   if (error) {
     console.warn("[Fechamento] View vw_sessao_resumo falhou:", error.message);
@@ -4029,45 +4012,30 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
       const dtIni = new Date(inicioISO).getTime();
       const dtFim = new Date(fimISO).getTime();
       if (dtQuit < dtIni || dtQuit > dtFim) return false;
-
-      // Troca a forma de pagamento para a forma da quitação
+      
       p.forma_pagamento = p.forma_pagamento_quitacao || "Efetivo";
     }
     return true;
   });
   const movsArr = movs || [];
 
-  // ═══════════════════════════════════════════════════════════════
-  //  🔧 CORREÇÃO CRÍTICA #1 — Faturamento = total_geral (inclui frete)
-  //
-  //  Antes: faturamentoReal = subtotal − descontos (SEM frete)
-  //         → frete entrava na gaveta mas não era receita,
-  //           porém o pagamento ao motoboy era subtraído como despesa,
-  //           gerando diferença = soma dos fretes.
-  //
-  //  Agora:  faturamentoReal = total_geral (inclui frete).
-  //          O repasse ao motoboy é despesa real → desconta do lucro.
-  //          Resultado: cliente paga Gs X (produto) + Gs Y (frete);
-  //          loja paga Gs Y ao motoboy; lucro = X + Y − Y = X. ✓
-  // ═══════════════════════════════════════════════════════════════
-  let faturamentoReal = 0;
+  let faturamentoReal   = 0;
   let freteCobradoTotal = 0;
-  let freteEmEspecie = 0;
-  let freteMotoboyAuto = 0;
-  let descontoTotal = 0;
+  let freteEmEspecie    = 0;
+  let freteMotoboyAuto  = 0;
+  let descontoTotal     = 0;
   const motoMap = {};
 
   pedsFiltrados.forEach((p) => {
     const sub = safeNum(p.subtotal);
-    const dc = safeNum(p.desconto_cupom);
-    const dp = safeNum(p.desconto_pdv_valor);
-    const cb = safeNum(p.cashback_valor);
+    const dc  = safeNum(p.desconto_cupom);
+    const dp  = safeNum(p.desconto_pdv_valor);
+    const cb  = safeNum(p.cashback_valor);
     const freteVal = safeNum(p.frete_cobrado_cliente);
 
-    descontoTotal += dc + dp + cb;
+    descontoTotal     += dc + dp + cb;
     freteCobradoTotal += freteVal;
 
-    // Faturamento = subtotal − descontos + frete cobrado
     faturamentoReal += Math.max(0, sub - dc - dp - cb) + freteVal;
 
     if (p.tipo_entrega === "delivery") {
@@ -4082,14 +4050,13 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
     }
   });
   delete motoMap["Sem Motoboy"];
-  const custoCombustivel =
-    (AJUDA_COMBUSTIVEL || 0) * Object.keys(motoMap).length;
+  const custoCombustivel = (AJUDA_COMBUSTIVEL || 0) * Object.keys(motoMap).length;
 
   // ── 3. Separa despesas motoboy vs. outras ──────────────────────
-  let motoboyTotal = 0;
-  let motoboyEfetivo = 0;
-  let outrasDespesas = 0;
-  let totalSangrias = 0;
+  let motoboyTotal     = 0;
+  let motoboyEfetivo   = 0;
+  let outrasDespesas   = 0;
+  let totalSangrias    = 0;
   let totalSuprimentos = 0;
 
   movsArr.forEach((m) => {
@@ -4118,38 +4085,56 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
   }
 
   const totalDespesas = motoboyTotal + outrasDespesas;
-  const totalSaidas = totalDespesas + totalSangrias;
+  const totalSaidas   = totalDespesas + totalSangrias;
   const lucroOperacional = faturamentoReal + totalSuprimentos - totalSaidas;
 
-  // ── 5. Totais por forma de pagamento (incluindo frete) ─────────
-  let totalEfetivo = 0,
-    totalPix = 0,
-    totalCartao = 0;
-  let totalCartaoBR = 0,
-    totalTransf = 0,
-    totalQrPy = 0,
-    totalMulti = 0;
+  // ── 5. Totais por forma de pagamento ─────────
+  let totalEfetivo = 0, totalPix = 0, totalCartao = 0;
+  let totalCartaoBR = 0, totalTransf = 0, totalQrPy = 0, totalMulti = 0;
 
   pedsFiltrados.forEach((p) => {
     const base = Math.max(
       0,
-      safeNum(p.subtotal) -
-        safeNum(p.desconto_cupom) -
-        safeNum(p.desconto_pdv_valor) -
-        safeNum(p.cashback_valor),
+      safeNum(p.subtotal) - safeNum(p.desconto_cupom) -
+      safeNum(p.desconto_pdv_valor) - safeNum(p.cashback_valor),
     );
-    // 🔧 Inclui frete no valor que efetivamente passou por cada meio de pagamento
+    
+    // Inclui frete no valor que efetivamente passou por cada meio de pagamento
     const val = base + safeNum(p.frete_cobrado_cliente);
     const pag = (p.forma_pagamento || "").toLowerCase();
-    if (pag.includes("efetivo") || pag.includes("dinheiro"))
-      totalEfetivo += val;
+    const obsPag = p.obs_pagamento || "";
+
+    // AQUI FOI A SEGUNDA CORREÇÃO: Adicionado o bloco do Multipagamento
+    if (pag === "multipagamento" && obsPag) {
+      try {
+        const partes = JSON.parse(obsPag);
+        if (Array.isArray(partes)) {
+          partes.forEach((parte) => {
+            const pf = (parte.metodo || parte.forma || "").toLowerCase();
+            const pv = Math.round(Number(parte.valor) || 0);
+            
+            if (pf.includes("efetivo") || pf.includes("dinheiro")) totalEfetivo += pv;
+            else if (pf.includes("pix")) totalPix += pv;
+            else if (pf === "cartaobr" || pf.includes("br")) totalCartaoBR += pv;
+            else if (pf.includes("cartao") || pf.includes("cartão")) totalCartao += pv;
+            else if (pf.includes("transfer") || pf.includes("alias")) totalTransf += pv;
+            else if (pf === "qrpy" || pf === "qr_py" || pf.includes("qr")) totalQrPy += pv;
+            else totalMulti += pv;
+          });
+        } else {
+          totalMulti += val;
+        }
+      } catch (_) {
+        totalMulti += val;
+      }
+    } 
+    // Pagamentos normais (não divididos)
+    else if (pag.includes("efetivo") || pag.includes("dinheiro")) totalEfetivo += val;
     else if (pag.includes("pix")) totalPix += val;
-    else if (pag === "cartaobr") totalCartaoBR += val;
-    else if (pag.includes("cartao") || pag.includes("cartão"))
-      totalCartao += val;
-    else if (pag.includes("transfer") || pag.includes("alias"))
-      totalTransf += val;
-    else if (pag === "qrpy") totalQrPy += val;
+    else if (pag === "cartaobr" || pag.includes("br")) totalCartaoBR += val;
+    else if (pag.includes("cartao") || pag.includes("cartão")) totalCartao += val;
+    else if (pag.includes("transfer") || pag.includes("alias")) totalTransf += val;
+    else if (pag === "qrpy" || pag === "qr_py") totalQrPy += val;
     else totalMulti += val;
   });
 
@@ -4159,9 +4144,8 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
       ? motoboyEfetivo + outrasDespesas + totalSangrias
       : freteEmEspecie + outrasDespesas + totalSangrias;
 
-  const valorAbertura =
-    safeNum(_sessaoCaixaAtiva?.valor_abertura) ||
-    (rows?.[0] ? safeNum(rows[0].valor_abertura) : 0);
+  const valorAbertura = safeNum(_sessaoCaixaAtiva?.valor_abertura) ||
+                        (rows?.[0] ? safeNum(rows[0].valor_abertura) : 0);
 
   const dinheiroGaveta =
     valorAbertura + totalSuprimentos + totalEfetivo - saidasEfetivo;
@@ -4170,73 +4154,73 @@ async function _calcularResumoSessao(sessaoId, inicioISO, fimISO) {
   if (!error && rows && rows.length > 0) {
     const r = rows[0];
     return {
-      sessao_id: r.sessao_id,
-      usuario_email: r.usuario_email,
-      usuario_nome: r.usuario_nome,
-      aberto_em: r.aberto_em,
-      fechado_em: r.fechado_em,
-      valor_abertura: valorAbertura,
+      sessao_id:         r.sessao_id,
+      usuario_email:     r.usuario_email,
+      usuario_nome:      r.usuario_nome,
+      aberto_em:         r.aberto_em,
+      fechado_em:        r.fechado_em,
+      valor_abertura:    valorAbertura,
 
-      faturamento: faturamentoReal,
-      frete_cobrado: freteCobradoTotal,
-      frete_em_especie: freteEmEspecie,
-      desconto_total: descontoTotal,
-      qtd_pedidos: safeNum(r.qtd_pedidos) || peds.length,
+      faturamento:       faturamentoReal,
+      frete_cobrado:     freteCobradoTotal,
+      frete_em_especie:  freteEmEspecie,
+      desconto_total:    descontoTotal,
+      qtd_pedidos:       safeNum(r.qtd_pedidos) || peds.length,
 
-      custo_entregas: custoEntregas,
+      custo_entregas:    custoEntregas,
       custo_combustivel: custoCombustivel,
-      motoboy_total: motoboyTotal,
-      motoboy_efetivo: motoboyEfetivo,
-      outras_despesas: outrasDespesas,
+      motoboy_total:     motoboyTotal,
+      motoboy_efetivo:   motoboyEfetivo,
+      outras_despesas:   outrasDespesas,
 
-      total_despesas: totalDespesas,
-      total_sangrias: totalSangrias,
+      total_despesas:    totalDespesas,
+      total_sangrias:    totalSangrias,
       total_suprimentos: totalSuprimentos,
-      total_saidas: totalSaidas,
-      total_entradas: totalSuprimentos,
+      total_saidas:      totalSaidas,
+      total_entradas:    totalSuprimentos,
 
       lucro_operacional: lucroOperacional,
-      dinheiro_gaveta: dinheiroGaveta,
+      dinheiro_gaveta:   dinheiroGaveta,
 
-      total_efetivo: totalEfetivo,
-      total_pix: totalPix,
-      total_cartao: totalCartao,
-      total_cartao_br: totalCartaoBR,
+      total_efetivo:       totalEfetivo,
+      total_pix:           totalPix,
+      total_cartao:        totalCartao,
+      total_cartao_br:     totalCartaoBR,
       total_transferencia: totalTransf,
-      total_qr_py: totalQrPy,
-      total_multi_outros: totalMulti,
+      total_qr_py:         totalQrPy,
+      total_multi_outros:  totalMulti,
     };
   }
 
   return {
-    sessao_id: sessaoId,
-    aberto_em: inicioISO,
-    fechado_em: fimISO,
-    valor_abertura: valorAbertura,
-    faturamento: faturamentoReal,
-    frete_cobrado: freteCobradoTotal,
-    frete_em_especie: freteEmEspecie,
-    desconto_total: descontoTotal,
-    qtd_pedidos: peds.length,
-    custo_entregas: custoEntregas,
-    custo_combustivel: custoCombustivel,
-    motoboy_total: motoboyTotal,
-    motoboy_efetivo: motoboyEfetivo,
-    outras_despesas: outrasDespesas,
-    total_despesas: totalDespesas,
-    total_sangrias: totalSangrias,
-    total_suprimentos: totalSuprimentos,
-    total_saidas: totalSaidas,
-    total_entradas: totalSuprimentos,
-    lucro_operacional: lucroOperacional,
-    dinheiro_gaveta: dinheiroGaveta,
-    total_efetivo: totalEfetivo,
-    total_pix: totalPix,
-    total_cartao: totalCartao,
-    total_cartao_br: totalCartaoBR,
+    sessao_id:           sessaoId,
+    aberto_em:           inicioISO,
+    fechado_em:          fimISO,
+    valor_abertura:      valorAbertura,
+    faturamento:         faturamentoReal,
+    frete_cobrado:       freteCobradoTotal,
+    frete_em_especie:    freteEmEspecie,
+    desconto_total:      descontoTotal,
+    qtd_pedidos:         peds.length,
+    custo_entregas:      custoEntregas,
+    custo_combustivel:   custoCombustivel,
+    motoboy_total:       motoboyTotal,
+    motoboy_efetivo:     motoboyEfetivo,
+    outras_despesas:     outrasDespesas,
+    total_despesas:      totalDespesas,
+    total_sangrias:      totalSangrias,
+    total_suprimentos:   totalSuprimentos,
+    total_saidas:        totalSaidas,
+    total_entradas:      totalSuprimentos,
+    lucro_operacional:   lucroOperacional,
+    dinheiro_gaveta:     dinheiroGaveta,
+    total_efetivo:       totalEfetivo,
+    total_pix:           totalPix,
+    total_cartao:        totalCartao,
+    total_cartao_br:     totalCartaoBR,
     total_transferencia: totalTransf,
-    total_qr_py: totalQrPy,
-    total_multi_outros: totalMulti,
+    total_qr_py:         totalQrPy,
+    total_multi_outros:  totalMulti,
   };
 }
 
