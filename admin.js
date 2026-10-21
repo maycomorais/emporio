@@ -432,6 +432,13 @@ function showTab(tabId, event) {
   console.log("Tentando abrir aba:", tabId);
   console.log("Event:", event);
 
+  // 🔒 SEGURANÇA: Bloqueia acesso à aba Master para qualquer um que não seja adminMaster
+  if (tabId === "adminmaster" && perfilUsuario !== "adminMaster") {
+    console.warn("Acesso negado à aba Master.");
+    alert("Acesso restrito. Apenas o Admin Master pode acessar esta aba.");
+    return;
+  }
+
   // 1. O 'de-para' para garantir que IDs como 'categorias' ou 'motoboys'
   // abram a aba pai correta no seu novo HTML
   let realTabId = tabId;
@@ -484,8 +491,6 @@ function showTab(tabId, event) {
     if (tabId === "categorias") showSubTab("lista-categorias-wrapper");
     else if (tabId === "motoboys") showSubTab("lista-motos-wrapper");
     else {
-      // Clique direto em "Produtos": sempre abre a lista de produtos,
-      // ignorando qualquer sub-aba salva de navegação anterior (ex: Categorias).
       showSubTab("lista-produtos-wrapper");
     }
   }
@@ -658,26 +663,36 @@ function _feat(categoria, chave) {
 
 function _aplicarVisibilidadeAbas() {
   const mapa = {
-    "menu-pedidos": "pedidos",
-    "menu-cozinha": "cozinha",
-    "menu-pdv": "pdv",
-    "menu-financeiro": "financeiro",
-    "menu-inventario": "inventario",
-    "menu-equipe": "equipe",
+    "menu-pedidos":       "pedidos",
+    "menu-cozinha":       "cozinha",
+    "menu-pdv":           "pdv",
+    "menu-financeiro":    "financeiro",
+    "menu-inventario":    "inventario",
+    "menu-equipe":        "equipe",
     "menu-configuracoes": "configuracoes",
-    "menu-dashboard": "dashboard",
-    "menu-estatisticas": "estatisticas",
+    "menu-dashboard":     "dashboard",
+    "menu-estatisticas":  "estatisticas",
     "menu-ficha-tecnica": "ficha-tecnica",
-    "menu-crm": "crm",
-    "menu-turnos": "turnos",
-    "menu-produtos": "produtos",
-    "menu-categorias": "categorias",
-    "menu-motoboys": "motoboys",
-    "menu-mensalistas": "mensalistas",
-    "menu-filiais": "filiais",
-    "menu-notas": "notas",
-    "menu-facturacion": "facturacion",
+    "menu-crm":           "crm",
+    "menu-turnos":        "turnos",
+    "menu-produtos":      "produtos",
+    "menu-categorias":    "categorias",
+    "menu-motoboys":      "motoboys",
+    "menu-mensalistas":   "mensalistas",
+    "menu-filiais":       "filiais",
+    "menu-notas":         "notas",
+    "menu-facturacion":   "facturacion"
   };
+  
+  // 🔒 SEGURANÇA: Oculta a aba Master explicitamente para não-admins
+  const menuAM = document.getElementById("menu-adminmaster");
+  if (menuAM) {
+    if (perfilUsuario === "adminMaster") {
+      menuAM.style.setProperty("display", "flex", "important");
+    } else {
+      menuAM.style.setProperty("display", "none", "important");
+    }
+  }
 
   if (perfilUsuario === "adminMaster") return;
 
@@ -688,27 +703,21 @@ function _aplicarVisibilidadeAbas() {
       return;
     }
     const visivel = _feat("tabs", chave);
-
-    // Usa important para evitar que regras CSS de flexbox mostrem o item
+    
     if (visivel) {
       el.style.setProperty("display", "flex", "important");
     } else {
       el.style.setProperty("display", "none", "important");
     }
   });
-
+  
   _aplicarFuncionalidades();
 
   // Redirecionamento inteligente
   setTimeout(() => {
-    const activeMenu = document.querySelector(".sb-menu-item.active");
-    if (
-      activeMenu &&
-      (activeMenu.style.display === "none" || activeMenu.style.display === "")
-    ) {
-      const firstVisible = document.querySelector(
-        '.sb-menu-item[style*="display: flex"]',
-      );
+    const activeMenu = document.querySelector('.sb-menu-item.active');
+    if (activeMenu && (activeMenu.style.display === 'none' || activeMenu.style.display === '')) {
+      const firstVisible = document.querySelector('.sb-menu-item[style*="display: flex"]');
       if (firstVisible && firstVisible !== activeMenu) {
         firstVisible.click();
       }
